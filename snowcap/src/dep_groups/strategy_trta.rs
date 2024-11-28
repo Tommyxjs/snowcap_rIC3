@@ -24,6 +24,9 @@ use crate::netsim::config::{ConfigExpr::BgpSession, ConfigModifier};
 use crate::netsim::{Network, NetworkError, RouterId};
 use crate::strategies::{PushBackTreeStrategy, Strategy};
 use crate::{Error, Stopper};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::process::{Command, Stdio};
+use std::string;
 
 use log::*;
 use rand::prelude::*;
@@ -245,7 +248,7 @@ impl Strategy for StrategyTRTA {
         let mut net = self.net.clone();
         let mut hard_policy = self.hard_policy.clone();
 
-        // 创建一个空的 Vec 来存储元组
+        // 创建一个空的 Vec 来存储(source, target)元组对
         let mut session_pairs = Vec::new();
 
         // 迭代 modifiers，提取 source 和 target
@@ -269,6 +272,26 @@ impl Strategy for StrategyTRTA {
 
         //打印出生成的列表
         println!("Session pairs: {:?}", session_pairs);
+
+        //最终目的是产生aalta_input，送进aalta中
+        let mut aalta_input = "True".to_string();
+        //构建每个状态只能做一个update的约束
+        let mut formula_parts = Vec::new();
+
+        //for i in 0..frame.rem_groups.len() {
+        for i in 0..6 {
+            let mut negations = Vec::new();
+            for j in 0..6 {
+                if i != j {
+                    negations.push(format!("!x{}", j));
+                }
+            }
+            let formula = format!("G(x{} -> {})", i, negations.join(" & "));
+            formula_parts.push(formula);
+        }
+        let mut always_formula_parts = formula_parts.join(" & ");
+        always_formula_parts.push_str(" & F x0 & F x1 & F x2 & F x3 & F x4 & F x5\n");
+        println!("formula_parts: {:?}", always_formula_parts);
 
         loop {
             // check for iter overflow检查时间是否已耗尽（即处理时间是否超时）
@@ -298,14 +321,14 @@ impl Strategy for StrategyTRTA {
 
             // 假设 done_updates 是一个 Vec<usize>，需要提前定义
             // let mut done_updates = Vec::new();
-            let mut doing_update = *frame.rem_groups.get(frame.idx).unwrap();
+            //let mut doing_update = *frame.rem_groups.get(frame.idx).unwrap();
 
             // 将 doing_update 添加到 done_updates 列表中
             // done_updates.push(doing_update);
 
             // 输出 done_updates 列表
             // println!("Done updates: {:?}", done_updates);
-
+            let mut indices = Vec::new();
             // search the current stack frame for the next        // 查找当前堆栈帧的下一步操作
             let action: StackAction = match self.get_next_option(&mut net, &mut hard_policy, frame)
             {
@@ -327,27 +350,41 @@ impl Strategy for StrategyTRTA {
                     }
 
                     // Prepare the stack action with the new stack frame
-                    StackAction::Push(StackFrame::new(
-                        frame.rem_groups.iter().cloned().filter(|x| *x != next_group_idx),
-                        self.groups[next_group_idx].len(),
-                        &mut self.rng,
-                    ))
+                    StackAction::Push(StackFrame {
+                        rem_groups: frame
+                            .rem_groups
+                            .iter()
+                            .cloned()
+                            .filter(|x| *x != next_group_idx)
+                            .collect(),
+                        idx: 0, // 这里我们明确设置 idx 为 0 或者根据逻辑需要的特定值
+                        num_undo: self.groups[next_group_idx].len(), // 不使用随机数生成器
+                    })
+                    // StackAction::Push(StackFrame::new(
+                    //     frame.rem_groups.iter().cloned().filter(|x| *x != next_group_idx),
+                    //     self.groups[next_group_idx].len(),
+                    //     &mut self.rng,
+                    // ))
                 }
                 Err(check_idx) => {
                     println!("Now we have the Extracted NodeIndices: {:?}", check_idx);
                     let mut formulas = Vec::new();
+
                     for node in check_idx.iter() {
-                        let mut matched_indices: Vec<usize> = Vec::new();
-                        // 遍历 session_pairs 并检查是否匹配
+                        let mut node_formulas = Vec::new();
+                        //遍历有问题的节点
+                        let mut matched_indices: Vec<usize> = Vec::new(); //把涉及有问题节点的更新的下标取出来
+                                                                          // 遍历 session_pairs 并检查是否匹配
                         for (i, (source, target)) in session_pairs.iter().enumerate() {
                             if *source == *node || *target == *node {
                                 // 如果匹配，则将下标存储到 matched_indices
                                 matched_indices.push(i);
                             }
                         }
-                        let mut node_formulas = Vec::new();
+                        println!("Matched session indices: {:?}", matched_indices);
+                        //每次取出来，如果不等于已经执行的更新，添加约束
                         for &index in &matched_indices {
-                            if !(0..frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)) {
+                            if !(0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)) {
                                 let formula = format!(
                                     "!(!x{:?} U x{:?})",
                                     index,
@@ -358,15 +395,125 @@ impl Strategy for StrategyTRTA {
                         }
                         if !node_formulas.is_empty() {
                             // 将每个 node 的公式用括号包裹，并连接起来
-                            let combined_node_formula =
-                                format!("({})", node_formulas.join(" \\/ "));
+                            let combined_node_formula = format!("({})", node_formulas.join(" | "));
                             formulas.push(combined_node_formula); // 添加到总公式集合
                         }
-                        println!("Matched session indices: {:?}", matched_indices);
                     }
-                    let combined_formula = formulas.join(" /\\ ");
+
+                    let combined_formula = formulas.join(" & ");
                     println!("Combined formula: {}", combined_formula);
-                    StackAction::Pop
+
+                    // 构造LTL公式的条件
+                    // 创建一个新的 Vec 来存储前缀列表
+                    let mut prefix_list: Vec<usize> = Vec::new();
+
+                    // 将 frame.rem_groups 中下标从 0 到 frame.idx - 1 的元素添加到 prefix_list
+                    for i in 0..frame.idx {
+                        if let Some(value) = frame.rem_groups.get(i) {
+                            prefix_list.push(*value); // 将元素添加到 prefix_list
+                        }
+                    }
+
+                    // 如果 prefix_list 为空，则 LTL 表达式设置为 "True"
+                    let prefix = if prefix_list.is_empty() {
+                        "True".to_string()
+                    } else {
+                        // 初始的 LTL 表达式是 prefix 中最后一个元素
+                        let mut prefix_expr = format!("x{}", prefix_list[prefix_list.len() - 1]);
+
+                        // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                        for i in (0..prefix_list.len() - 1).rev() {
+                            // 这里用 prefix_list.len() - 1
+                            prefix_expr = format!("x{} & XF({})", prefix_list[i], prefix_expr);
+                        }
+                        prefix_expr
+                    };
+
+                    // 打印生成的 LTL 表达式
+                    println!("Generated LTL Prefix: {}", prefix);
+
+                    //(prefix -> (combined_formula)) & aalta_input & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
+                    aalta_input = format!(
+                        "({} -> ({})) & {} & {}",
+                        prefix, combined_formula, aalta_input, always_formula_parts
+                    );
+                    println!("aalta_input: {}", aalta_input);
+                    //新建子线程
+                    let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
+                        .arg("-e")
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn()
+                        .expect("Failed to start process");
+
+                    {
+                        // 获取子进程的标准输入(aalta_input)
+                        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+                        stdin.write_all(aalta_input.as_bytes()).expect("Failed to write to stdin");
+                        stdin.flush().expect("Failed to flush stdin");
+                    }
+                    println!("Finish aalta input!");
+                    let output = child.stdout.take().expect("Failed to open stdout");
+                    println!("Begin aalta output!");
+                    // 使用 BufReader 来读取输出
+                    let mut output_str = String::new();
+                    let mut reader = BufReader::new(output);
+                    reader.read_to_string(&mut output_str).expect("Failed to read stdout");
+                    println!("Output: {}", output_str);
+
+                    // 对aalta的输出进行解析
+                    let lines: Vec<&str> = output_str.lines().collect();
+                    // let mut indices = Vec::new();
+                    // 检查结果是否为sat
+                    if lines.len() > 1 && lines[1].trim() == "sat" {
+                        // 对从第三行之后的结果进行处理
+                        for line in lines.iter().skip(2) {
+                            // skip first two lines (header and "sat")
+                            // 按，分片
+                            for part in line.split(",") {
+                                let trimmed = part.trim();
+
+                                // 检索所有以x开始的变量
+                                if trimmed.starts_with("x") {
+                                    // Extract the number after "x", whether or not it is preceded by "!"
+                                    if let Some(index_str) = trimmed.strip_prefix("x") {
+                                        if let Ok(index) = index_str.trim().parse::<usize>() {
+                                            // Push the extracted index to the indices vector
+                                            indices.push(index);
+                                        }
+                                    }
+                                    //检索在开头但是以（x开始的变量
+                                } else if trimmed.starts_with("(x") {
+                                    // Handle the case for "(xN" where N is the index we want
+                                    if let Some(index_str) = trimmed.strip_prefix("(x") {
+                                        if let Ok(index) = index_str.trim().parse::<usize>() {
+                                            indices.push(index);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 输出解析出来的更新序列
+                        println!("Extracted indices: {:?}", indices);
+                    } else {
+                        println!("Second line is not 'sat', skipping extraction.");
+                    }
+                    // 等待子进程完成
+                    let exit_status = child.wait().expect("Child process wasn't running");
+
+                    // 打印子进程的退出状态
+                    println!("Child exited with status: {}", exit_status);
+
+                    // // 直接退出主进程
+                    // std::process::exit(exit_status.code().unwrap_or(1));
+                    // let stack_frame = StackFrame { idx: 0, rem_groups: indices, num_undo: 0 };
+
+                    // 将新的栈帧添加到栈中
+                    // stack.push(stack_frame);
+                    StackAction::Reset
+                    // StackAction::Push(stack_frame)
+
                     // #[cfg(feature = "count-states")]
                     // {
                     //     self.seen_difficult_dependency = true;
@@ -435,6 +582,26 @@ impl Strategy for StrategyTRTA {
                     hard_policy = self.hard_policy.clone();
                 }
             }
+
+            if !indices.is_empty() {
+                // 检查 indices 是否为空
+                let stack_frame = StackFrame {
+                    idx: 0,
+                    rem_groups: indices, // 使用 indices
+                    num_undo: 0,
+                };
+                stack.push(stack_frame); // 将新构造的 stack_frame 推入栈中
+            }
+
+            // if let StackAction::Reset = action.clone() {
+            //     // 构造新的 StackFrame
+            //     let stack_frame = StackFrame {
+            //         idx: 0,
+            //         rem_groups: indices, // 这里 indices 在上面已经获取
+            //         num_undo: 0,
+            //     };
+            //     stack.push(stack_frame);
+            // }
         }
     }
 
@@ -467,6 +634,7 @@ impl StrategyTRTA {
             let mut mod_ok: bool = true;
             let mut num_undo: usize = 0;
             let mut num_undo_policy: usize = 0;
+            let mut error_node_indices: Option<Vec<RouterId>> = None;
             'apply_group: for modifier in self.groups[group_idx].iter() {
                 #[cfg(feature = "count-states")]
                 {
@@ -486,9 +654,8 @@ impl StrategyTRTA {
                             println!("Error checking policies: {:?}", e);
                             match e {
                                 NetworkError::ForwardingBlackHole(node_indices) => {
-                                    // 打印提取的 NodeIndex
                                     println!("Extracted NodeIndices: {:?}", node_indices);
-                                    return Err(node_indices.clone());
+                                    error_node_indices = Some(node_indices.clone());
                                 }
                                 // 可以处理其他错误类型
                                 _ => {
@@ -518,6 +685,9 @@ impl StrategyTRTA {
                 (0..num_undo).for_each(|_| {
                     net.undo_action().expect("Cannot perform undo!");
                 });
+                if let Some(node_indices) = error_node_indices {
+                    return Err(node_indices);
+                }
             }
         }
         Err(vec![])
