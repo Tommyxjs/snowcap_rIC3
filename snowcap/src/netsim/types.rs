@@ -224,6 +224,9 @@ pub enum NetworkError {
     /// Black hole detected
     #[error("Black hole occurred! path: {0:?}")]
     ForwardingBlackHole(Vec<RouterId>),
+    /// Forwarding loops detected
+    #[error("Forwarding Loop occurred! path: {0:?}")]
+    ForwardingLoops(Vec<Vec<RouterId>>),
     /// Invalid BGP session type
     #[error("Invalid Session type: source: {0:?}, target: {1:?}, type: {2:?}")]
     InvalidBgpSessionType(RouterId, RouterId, BgpSessionType),

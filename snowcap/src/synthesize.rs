@@ -79,7 +79,7 @@ pub fn synthesize(
     // compute the set of modifiers
     let patch = config_a.get_diff(&config_b);
 
-    println!("Patch: {:?}", patch);
+    // println!("Patch: {:?}", patch);
 
     let modifiers: Vec<ConfigModifier> = patch.modifiers;
 

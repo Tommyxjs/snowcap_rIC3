@@ -135,7 +135,8 @@ impl HardPolicy {
         // prepare new state
         let mut new_state = Vec::with_capacity(self.prop_vars.len());
         let mut new_error: Vec<Option<PolicyError>> = Vec::with_capacity(self.prop_vars.len());
-        let mut collected_errors: Vec<RouterId> = Vec::new(); // check all prop_vars
+        let mut blackhole_errors: Vec<RouterId> = Vec::new();
+        let mut forwarding_loop_errors: Vec<Vec<RouterId>> = Vec::new();
         for v in self.prop_vars.iter() {
             match v.check(state) {
                 Ok(()) => {
@@ -146,16 +147,30 @@ impl HardPolicy {
                     new_state.push(false);
                     new_error.push(Some(e.clone()));
                     if let PolicyError::BlackHole { router, .. } = &e {
-                        collected_errors.push(*router); // 添加 RouterId
+                        blackhole_errors.push(*router); // 收集 BlackHole 的路由器信息
+                    } else if let PolicyError::ForwardingLoop { path, .. } = &e {
+                        let mut forwarding_loop_indices: Vec<RouterId> = Vec::new();
+                        forwarding_loop_indices.extend(path.iter());
+                        // 直接将每个 sub_path 添加到 forwarding_loop_errors
+                        forwarding_loop_errors.push(forwarding_loop_indices);
+                        // forwarding_loop_errors.extend(path.iter());
                     }
                 }
             }
         }
-        if !collected_errors.is_empty() {
-            println!("Collected policy errors: {:?}", collected_errors);
-            // 进一步处理这些错误
+
+        let mut seen_1 = HashSet::new(); // 用来追踪已经遇到的元素
+        let mut seen_2 = HashSet::new(); // 用来追踪已经遇到的元素
+                                         // 使用 retain 和 HashSet 去重
+        blackhole_errors.retain(|error| seen_1.insert(error.clone()));
+        forwarding_loop_errors.retain(|error| seen_2.insert(error.clone()));
+
+        if !blackhole_errors.is_empty() {
+            // println!("Collected blackhole_errors: {:?}", blackhole_errors);
+        } else if !forwarding_loop_errors.is_empty() {
+            // println!("Collected forwarding_loop_errors: {:?}", forwarding_loop_errors);
         }
-        println!("--------------3---------------!");
+        // println!("--------------3---------------!");
 
         // Next, we need to check the reliability
         if !self.reliability.is_empty() {
@@ -290,10 +305,13 @@ impl HardPolicy {
         // finally, push the changes to the stack
         self.history.push(new_state);
         self.error_history.push(new_error);
-        if collected_errors.is_empty() {
-            Ok(())
+        // 根据错误类型分别返回
+        if !blackhole_errors.is_empty() {
+            Err(NetworkError::ForwardingBlackHole(blackhole_errors)) // 返回 BlackHole 错误
+        } else if !forwarding_loop_errors.is_empty() {
+            Err(NetworkError::ForwardingLoops(forwarding_loop_errors)) // 返回 ForwardingLoop 错误
         } else {
-            Err(NetworkError::ForwardingBlackHole(collected_errors)) // 返回 collected_errors 的内容
+            Ok(())
         }
     }
 

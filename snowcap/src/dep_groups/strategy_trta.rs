@@ -24,6 +24,7 @@ use crate::netsim::config::{ConfigExpr::BgpSession, ConfigModifier};
 use crate::netsim::{Network, NetworkError, RouterId};
 use crate::strategies::{PushBackTreeStrategy, Strategy};
 use crate::{Error, Stopper};
+use std::fmt::format;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::string;
@@ -257,7 +258,7 @@ impl Strategy for StrategyTRTA {
             .iter()
             .filter_map(|group| group.first().cloned()) // 获取每个group的第一个modifier
             .collect();
-        //println!("first_modifiers: {:?}", first_modifiers);
+        // println!("first_modifiers: {:?}", first_modifiers);
         for modifier in &first_modifiers {
             match modifier {
                 // 处理 Remove 和 Insert 两种情况
@@ -271,17 +272,17 @@ impl Strategy for StrategyTRTA {
         }
 
         //打印出生成的列表
-        println!("Session pairs: {:?}", session_pairs);
+        // println!("Session pairs: {:?}", session_pairs);
 
-        //最终目的是产生aalta_input，送进aalta中
-        let mut aalta_input = "True".to_string();
+        //最终目的是产生aalta_input，送进aalta中，但是循环的是ltl_string
+        let mut ltl_string = "True".to_string();
         //构建每个状态只能做一个update的约束
         let mut formula_parts = Vec::new();
 
         //for i in 0..frame.rem_groups.len() {
-        for i in 0..6 {
+        for i in 0..self.groups.len() {
             let mut negations = Vec::new();
-            for j in 0..6 {
+            for j in 0..self.groups.len() {
                 if i != j {
                     negations.push(format!("!x{}", j));
                 }
@@ -290,8 +291,11 @@ impl Strategy for StrategyTRTA {
             formula_parts.push(formula);
         }
         let mut always_formula_parts = formula_parts.join(" & ");
-        always_formula_parts.push_str(" & F x0 & F x1 & F x2 & F x3 & F x4 & F x5\n");
-        println!("formula_parts: {:?}", always_formula_parts);
+        always_formula_parts.push_str(&format!(
+            "{}\n",
+            (0..self.groups.len()).map(|i| format!("& F x{}", i)).collect::<Vec<_>>().join(" ")
+        ));
+        // println!("formula_parts: {:?}", always_formula_parts);
 
         loop {
             // check for iter overflow检查时间是否已耗尽（即处理时间是否超时）
@@ -310,7 +314,7 @@ impl Strategy for StrategyTRTA {
             // get the latest stack frame获取当前堆栈帧（用于管理待处理的组）
             let frame = match stack.last_mut() {
                 Some(frame) => {
-                    println!("Current frame: {:?}", frame);
+                    // println!("Current frame: {:?}", frame);
                     frame
                 }
                 None => {
@@ -318,7 +322,7 @@ impl Strategy for StrategyTRTA {
                     return Err(Error::ProbablyNoSafeOrdering);
                 }
             };
-
+            // println!("self.groups.len(): {}", self.groups.len());
             // 假设 done_updates 是一个 Vec<usize>，需要提前定义
             // let mut done_updates = Vec::new();
             //let mut doing_update = *frame.rem_groups.get(frame.idx).unwrap();
@@ -338,7 +342,7 @@ impl Strategy for StrategyTRTA {
                     // There exists a valid next step! Update the current sequence and the stack
                     let next_group_idx = frame.rem_groups[next_idx];
                     current_sequence.push(next_group_idx);
-
+                    // println!("current_sequence.len(): {}", current_sequence.len());
                     // check if all groups have been added to the sequence
                     if current_sequence.len() == self.groups.len() {
                         // We are done! found a valid solution!
@@ -366,7 +370,7 @@ impl Strategy for StrategyTRTA {
                     //     &mut self.rng,
                     // ))
                 }
-                Err(check_idx) => {
+                Err(NetworkError::ForwardingBlackHole(check_idx)) => {
                     println!("Now we have the Extracted NodeIndices: {:?}", check_idx);
                     let mut formulas = Vec::new();
 
@@ -384,7 +388,10 @@ impl Strategy for StrategyTRTA {
                         println!("Matched session indices: {:?}", matched_indices);
                         //每次取出来，如果不等于已经执行的更新，添加约束
                         for &index in &matched_indices {
-                            if !(0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)) {
+                            // 确保 index 不等于 current_sequence 中的任何一项，并且不等于 frame.rem_groups.get(0)
+                            if !(current_sequence.contains(&index)
+                                || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
+                            {
                                 let formula = format!(
                                     "!(!x{:?} U x{:?})",
                                     index,
@@ -400,44 +407,70 @@ impl Strategy for StrategyTRTA {
                         }
                     }
 
-                    let combined_formula = formulas.join(" & ");
+                    //如果formulas为空，那么要么在没做的更新里面没有直连的bgp session可以解决问题，没做的更新集合为空
+                    let combined_formula = if formulas.is_empty() {
+                        // 初始化 combined_formula
+                        let mut combined_formula =
+                            format!("x{}", *frame.rem_groups.get(frame.idx).unwrap());
+
+                        // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                        for i in (0..current_sequence.len()).rev() {
+                            combined_formula =
+                                format!("x{} & X(F({}))", current_sequence[i], combined_formula);
+                        }
+
+                        // 给 combined_formula 添加 ! 外围
+                        format!("!({})", combined_formula)
+                    } else {
+                        formulas.join(" & ").to_string()
+                    };
+
                     println!("Combined formula: {}", combined_formula);
 
+                    // // 如果当前执行的更新为最后一个更新，但是无效，此时学习不到任何约束，但仍需阻止当前更新序列
+                    // if self.groups.len() == current_sequence.len() + 1 {
+                    //     // 构建 LTL 公式，从 current_sequence 的最后一个元素开始
+                    //     let mut blocked_sequence =
+                    //         format!("x{}", *frame.rem_groups.get(frame.idx).unwrap());
+
+                    //     // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                    //     for i in (0..current_sequence.len()).rev() {
+                    //         blocked_sequence =
+                    //             format!("x{} & X(F({}))", current_sequence[i], blocked_sequence);
+                    //     }
+                    //     blocked_sequence = format!("!({})", blocked_sequence);
+
+                    //     // 打印构建好的 LTL 公式
+                    //     println!("Blocked sequence LTL formula: {}", blocked_sequence);
+
+                    //     combined_formula = format!("{} & {}", combined_formula, blocked_sequence);
+                    // }
+
                     // 构造LTL公式的条件
-                    // 创建一个新的 Vec 来存储前缀列表
-                    let mut prefix_list: Vec<usize> = Vec::new();
-
-                    // 将 frame.rem_groups 中下标从 0 到 frame.idx - 1 的元素添加到 prefix_list
-                    for i in 0..frame.idx {
-                        if let Some(value) = frame.rem_groups.get(i) {
-                            prefix_list.push(*value); // 将元素添加到 prefix_list
-                        }
-                    }
-
-                    // 如果 prefix_list 为空，则 LTL 表达式设置为 "True"
-                    let prefix = if prefix_list.is_empty() {
+                    let prefix = if current_sequence.is_empty() {
                         "True".to_string()
                     } else {
                         // 初始的 LTL 表达式是 prefix 中最后一个元素
-                        let mut prefix_expr = format!("x{}", prefix_list[prefix_list.len() - 1]);
+                        let mut prefix_expr =
+                            format!("x{}", current_sequence[current_sequence.len() - 1]);
 
                         // 从倒数第二个元素到第一个元素构建 LTL 表达式
-                        for i in (0..prefix_list.len() - 1).rev() {
+                        for i in (0..current_sequence.len() - 1).rev() {
                             // 这里用 prefix_list.len() - 1
-                            prefix_expr = format!("x{} & XF({})", prefix_list[i], prefix_expr);
+                            prefix_expr =
+                                format!("x{} & X(F({}))", current_sequence[i], prefix_expr);
                         }
                         prefix_expr
                     };
 
                     // 打印生成的 LTL 表达式
-                    println!("Generated LTL Prefix: {}", prefix);
-
-                    //(prefix -> (combined_formula)) & aalta_input & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
-                    aalta_input = format!(
-                        "({} -> ({})) & {} & {}",
-                        prefix, combined_formula, aalta_input, always_formula_parts
-                    );
-                    println!("aalta_input: {}", aalta_input);
+                    // println!("Generated LTL Prefix: {}", prefix);
+                    let prefix = "True".to_string();
+                    //(prefix -> (combined_formula)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
+                    ltl_string =
+                        format!("(({}) -> ({})) & {}", prefix, combined_formula, ltl_string);
+                    let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
+                    // println!("aalta_input: {}", aalta_input);
                     //新建子线程
                     let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
                         .arg("-e")
@@ -549,6 +582,231 @@ impl Strategy for StrategyTRTA {
                     //     }
                     // }
                 }
+                Err(NetworkError::ForwardingLoops(check_idx)) => {
+                    println!("Now we have the Extracted NodeIndices: {:?}", check_idx);
+                    let mut combined_formula_from_loop = Vec::new();
+                    for forwardingloop in check_idx.iter() {
+                        let mut node_formulas = Vec::new();
+                        let mut matched_indices: Vec<usize> = Vec::new(); //把涉及有问题节点的更新的下标取出来
+                        for node in forwardingloop.iter() {
+                            // 遍历有问题的节点
+                            // 遍历 session_pairs 并检查是否匹配
+                            for (i, (source, target)) in session_pairs.iter().enumerate() {
+                                if (*source == *node || *target == *node)
+                                    && !matched_indices.contains(&i)
+                                {
+                                    // 如果匹配，则将下标存储到 matched_indices
+                                    matched_indices.push(i);
+                                }
+                            }
+                            println!("Matched session indices: {:?}", matched_indices);
+                        }
+                        //每次取出来，如果不等于已经执行的更新，添加约束
+                        for &index in &matched_indices {
+                            // 确保 index 不等于 current_sequence 中的任何一项，并且不等于 frame.rem_groups.get(0)
+                            if !(current_sequence.contains(&index)
+                                || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
+                            {
+                                let formula = format!(
+                                    "!(!x{:?} U x{:?})",
+                                    index,
+                                    *frame.rem_groups.get(frame.idx).unwrap()
+                                );
+                                node_formulas.push(formula);
+                            }
+                        }
+                        if !node_formulas.is_empty() {
+                            // 将每个 node 的公式用括号包裹，并连接起来
+                            let combined_node_formula = format!("({})", node_formulas.join(" | "));
+                            combined_formula_from_loop.push(combined_node_formula);
+                            println!(
+                                "combined_formula_from_loop: {:?}",
+                                combined_formula_from_loop
+                            );
+                            // 添加到总公式集合
+                        }
+                    }
+
+                    //如果combined_formula_from_loop为空，那么要么在没做的更新里面没有直连的bgp session可以解决问题，没做的更新集合为空
+                    let combined_formula_form_loops = if combined_formula_from_loop.is_empty() {
+                        // 初始化 combined_formula
+                        let mut combined_formula =
+                            format!("x{}", *frame.rem_groups.get(frame.idx).unwrap());
+
+                        // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                        for i in (0..current_sequence.len()).rev() {
+                            combined_formula =
+                                format!("x{} & X(F({}))", current_sequence[i], combined_formula);
+                        }
+
+                        // 给 combined_formula 添加 ! 外围
+                        format!("!({})", combined_formula)
+                    } else {
+                        combined_formula_from_loop.join(" & ").to_string()
+                    };
+
+                    println!("combined_formula_form_loops: {}", combined_formula_form_loops);
+
+                    // // 如果当前执行的更新为最后一个更新，但是无效，此时学习不到任何约束，但仍需阻止当前更新序列
+                    // if self.groups.len() == current_sequence.len() + 1 {
+                    //     // 构建 LTL 公式，从 current_sequence 的最后一个元素开始
+                    //     let mut blocked_sequence =
+                    //         format!("x{}", *frame.rem_groups.get(frame.idx).unwrap());
+
+                    //     // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                    //     for i in (0..current_sequence.len()).rev() {
+                    //         blocked_sequence =
+                    //             format!("x{} & X(F({}))", current_sequence[i], blocked_sequence);
+                    //     }
+                    //     blocked_sequence = format!("!({})", blocked_sequence);
+
+                    //     // 打印构建好的 LTL 公式
+                    //     println!("Blocked sequence LTL formula: {}", blocked_sequence);
+
+                    //     combined_formula_form_loops =
+                    //         format!("{} & {}", combined_formula_form_loops, blocked_sequence);
+                    // }
+
+                    // 构造LTL公式的条件
+                    let prefix = if current_sequence.is_empty() {
+                        "True".to_string()
+                    } else {
+                        // 初始的 LTL 表达式是 prefix 中最后一个元素
+                        let mut prefix_expr =
+                            format!("x{}", current_sequence[current_sequence.len() - 1]);
+
+                        // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                        for i in (0..current_sequence.len() - 1).rev() {
+                            // 这里用 prefix_list.len() - 1
+                            prefix_expr =
+                                format!("x{} & X(F({}))", current_sequence[i], prefix_expr);
+                        }
+                        prefix_expr
+                    };
+
+                    // 打印生成的 LTL 表达式
+                    // println!("Generated LTL Prefix: {}", prefix);
+                    let prefix = "True".to_string();
+
+                    //(prefix -> (combined_formula_form_loops)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
+                    ltl_string = format!(
+                        "(({}) -> ({})) & {}",
+                        prefix, combined_formula_form_loops, ltl_string
+                    );
+                    let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
+                    // println!("aalta_input: {}", aalta_input);
+                    //新建子线程
+                    let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
+                        .arg("-e")
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn()
+                        .expect("Failed to start process");
+
+                    {
+                        // 获取子进程的标准输入(aalta_input)
+                        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+                        stdin.write_all(aalta_input.as_bytes()).expect("Failed to write to stdin");
+                        stdin.flush().expect("Failed to flush stdin");
+                    }
+                    // println!("Finish aalta input!");
+                    let output = child.stdout.take().expect("Failed to open stdout");
+                    // println!("Begin aalta output!");
+                    // 使用 BufReader 来读取输出
+                    let mut output_str = String::new();
+                    let mut reader = BufReader::new(output);
+                    reader.read_to_string(&mut output_str).expect("Failed to read stdout");
+                    println!("Output: {}", output_str);
+
+                    // 对aalta的输出进行解析
+                    let lines: Vec<&str> = output_str.lines().collect();
+                    // let mut indices = Vec::new();
+                    // 检查结果是否为sat
+                    if lines.len() > 1 && lines[1].trim() == "sat" {
+                        // 对从第三行之后的结果进行处理
+                        for line in lines.iter().skip(2) {
+                            // skip first two lines (header and "sat")
+                            // 按，分片
+                            for part in line.split(",") {
+                                let trimmed = part.trim();
+
+                                // 检索所有以x开始的变量
+                                if trimmed.starts_with("x") {
+                                    // Extract the number after "x", whether or not it is preceded by "!"
+                                    if let Some(index_str) = trimmed.strip_prefix("x") {
+                                        if let Ok(index) = index_str.trim().parse::<usize>() {
+                                            // Push the extracted index to the indices vector
+                                            indices.push(index);
+                                        }
+                                    }
+                                    //检索在开头但是以（x开始的变量
+                                } else if trimmed.starts_with("(x") {
+                                    // Handle the case for "(xN" where N is the index we want
+                                    if let Some(index_str) = trimmed.strip_prefix("(x") {
+                                        if let Ok(index) = index_str.trim().parse::<usize>() {
+                                            indices.push(index);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 输出解析出来的更新序列
+                        // println!("Extracted indices: {:?}", indices);
+                    } else {
+                        println!("Second line is not 'sat', skipping extraction.");
+                    }
+                    // 等待子进程完成
+                    let exit_status = child.wait().expect("Child process wasn't running");
+
+                    // 打印子进程的退出状态
+                    // println!("Child exited with status: {}", exit_status);
+
+                    // // 直接退出主进程
+                    // std::process::exit(exit_status.code().unwrap_or(1));
+                    // let stack_frame = StackFrame { idx: 0, rem_groups: indices, num_undo: 0 };
+
+                    // 将新的栈帧添加到栈中
+                    // stack.push(stack_frame);
+                    StackAction::Reset
+                    // StackAction::Push(stack_frame)
+
+                    // #[cfg(feature = "count-states")]
+                    // {
+                    //     self.seen_difficult_dependency = true;
+                    // }
+                    // // There exists no option, that we can take, which would lead to a good result!
+                    // // First, we set the next index to the length of the options, in order to
+                    // // remember that we have checked everything
+                    // frame.idx = frame.rem_groups.len();
+                    // // What we do here is try to find a dependency!
+                    // match self.find_dependency(
+                    //     &mut net,
+                    //     &mut hard_policy,
+                    //     &current_sequence,
+                    //     frame.rem_groups[check_idx],
+                    //     abort.clone(),
+                    // ) {
+                    //     Some((new_group, old_groups)) => {
+                    //         info!("Found a new dependency group!");
+                    //         // add the new ordering to the known groups
+                    //         utils::add_minimal_ordering_as_new_gorup(
+                    //             &mut self.groups,
+                    //             old_groups,
+                    //             Some(new_group),
+                    //         );
+                    //         // reset the stack frame
+                    //         StackAction::Reset
+                    //     }
+                    //     None => {
+                    //         // No dependency group could be found! Continue exploring the search
+                    //         // space
+                    //         info!("Could not find a new dependency group!");
+                    //         StackAction::Pop
+                    //     }
+                    // }
+                }
+                _ => StackAction::Reset,
             };
 
             // at this point, the mutable reference to `stack` (i.e., `frame`) is dropped, which
@@ -624,17 +882,18 @@ impl StrategyTRTA {
         net: &mut Network,
         hard_policy: &mut HardPolicy,
         frame: &StackFrame,
-    ) -> Result<usize, Vec<RouterId>> {
+    ) -> Result<usize, NetworkError> {
         assert!(frame.idx < frame.rem_groups.len());
         for group_pos in frame.idx..frame.rem_groups.len() {
             let group_idx = *frame.rem_groups.get(group_pos).unwrap();
-            println!("Done updates: {:?}", group_idx);
+            // println!("Done updates: {:?}", group_idx);
 
             // perform the modification group
             let mut mod_ok: bool = true;
             let mut num_undo: usize = 0;
             let mut num_undo_policy: usize = 0;
-            let mut error_node_indices: Option<Vec<RouterId>> = None;
+            let mut blackhole_error_node_indices: Option<Vec<RouterId>> = None;
+            let mut forwarding_loop_error_node_indices: Option<Vec<Vec<RouterId>>> = None;
             'apply_group: for modifier in self.groups[group_idx].iter() {
                 #[cfg(feature = "count-states")]
                 {
@@ -645,36 +904,45 @@ impl StrategyTRTA {
                     num_undo_policy += 1;
                     let mut fw_state = net.get_forwarding_state();
                     // hard_policy.step(net, &mut fw_state).expect("cannot check policies!");
-                    println!("--------------1---------------!");
+                    // println!("--------------1---------------!");
                     let result = hard_policy.step(net, &mut fw_state);
-                    println!("--------------2---------------!");
+                    // println!("--------------2---------------!");
                     match result {
-                        Ok(_) => println!("Policies checked successfully!"),
+                        Ok(_) => {} //println!("Policies checked successfully!"),
                         Err(e) => {
                             println!("Error checking policies: {:?}", e);
                             match e {
                                 NetworkError::ForwardingBlackHole(node_indices) => {
-                                    println!("Extracted NodeIndices: {:?}", node_indices);
-                                    error_node_indices = Some(node_indices.clone());
+                                    println!(
+                                        "Extracted NodeIndices from BlackHole: {:?}",
+                                        node_indices
+                                    );
+                                    blackhole_error_node_indices = Some(node_indices.clone());
+                                }
+                                NetworkError::ForwardingLoops(path) => {
+                                    println!("Extracted Path from ForwardingLoop: {:?}", path);
+                                    forwarding_loop_error_node_indices = Some(path.clone());
+                                    // 如果逻辑需要也存储路径
                                 }
                                 // 可以处理其他错误类型
                                 _ => {
-                                    println!("NotForwardingBlackHole: {:?}", e);
+                                    println!("Unhandled Error Type: {:?}", e);
                                 }
                             }
                         }
                     }
-
+                    //如果不满足性质
                     if !hard_policy.check() {
                         mod_ok = false;
                         break 'apply_group;
                     }
+                    //如果不能做这些更新
                 } else {
                     mod_ok = false;
                     break 'apply_group;
                 }
             }
-
+            // println!("mod_ok:{}", mod_ok);
             // check if the modifier is ok
             if mod_ok {
                 // everything fine, return the index
@@ -685,12 +953,16 @@ impl StrategyTRTA {
                 (0..num_undo).for_each(|_| {
                     net.undo_action().expect("Cannot perform undo!");
                 });
-                if let Some(node_indices) = error_node_indices {
-                    return Err(node_indices);
+                if let Some(node_indices) = blackhole_error_node_indices {
+                    return Err(NetworkError::ForwardingBlackHole(node_indices));
+                    // 直接解构 Some 并返回内部的 Vec
+                }
+                if let Some(path) = forwarding_loop_error_node_indices {
+                    return Err(NetworkError::ForwardingLoops(path)); // 直接解构 Some 并返回内部的 Vec
                 }
             }
         }
-        Err(vec![])
+        Err(NetworkError::NoConvergence)
         // if we reach this position, we know that every possible option is bad!
         //Err(self.rng.gen_range(frame.idx, frame.rem_groups.len()))
     }

@@ -25,6 +25,7 @@ use snowcap::topology_zoo::{self, ZooTopology};
 use snowcap::{optimize, synthesize, Stopper};
 use snowcap_bencher::*;
 use snowcap_runtime::perform_migration;
+use std::time::Instant;
 
 use clap::Clap;
 use log::*;
@@ -40,7 +41,7 @@ use transient_violation::*;
 fn main() -> Result<(), Box<dyn Error>> {
     // run clap
     let args = CommandLineArguments::parse();
-
+    let start = Instant::now();
     // match on the action
     match args.cmd {
         MainCommand::TransientViolation {
@@ -203,6 +204,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             bench(net, final_config, hard_policy, scenario, args)?;
         }
     }
+    let duration = start.elapsed();
+    println!("代码运行时间: {:?}", duration);
     Ok(())
 }
 
