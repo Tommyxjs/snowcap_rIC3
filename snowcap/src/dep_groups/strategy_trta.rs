@@ -25,7 +25,8 @@ use crate::netsim::{Network, NetworkError, RouterId};
 use crate::strategies::{PushBackTreeStrategy, Strategy};
 use crate::{Error, Stopper};
 use std::fmt::format;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::string;
 
@@ -408,17 +409,17 @@ impl Strategy for StrategyTRTA {
                             if !(current_sequence.contains(&index)
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
                             {
-                                let formula = format!(
-                                    "! (! x{:?} U x{:?})",
-                                    index,
-                                    *frame.rem_groups.get(frame.idx).unwrap()
-                                );
+                                let formula = format!("N(G(! e{:?}))", index);
                                 node_formulas.push(formula);
                             }
                         }
                         if !node_formulas.is_empty() {
                             // 将每个 node 的公式用括号包裹，并连接起来
-                            let combined_node_formula = format!("({})", node_formulas.join(" | "));
+                            let combined_node_formula = format!(
+                                "G(e{} -> ({}))",
+                                *frame.rem_groups.get(frame.idx).unwrap(),
+                                node_formulas.join(" | ")
+                            );
                             formulas.push(combined_node_formula); // 添加到总公式集合
                         }
                     }
@@ -427,12 +428,12 @@ impl Strategy for StrategyTRTA {
                     let combined_formula = if formulas.is_empty() {
                         // 初始化 combined_formula
                         let mut combined_formula =
-                            format!("x{}", *frame.rem_groups.get(frame.idx).unwrap());
+                            format!("e{}", *frame.rem_groups.get(frame.idx).unwrap());
 
                         // 从倒数第二个元素到第一个元素构建 LTL 表达式
                         for i in (0..current_sequence.len()).rev() {
                             combined_formula =
-                                format!("x{} & X(F({}))", current_sequence[i], combined_formula);
+                                format!("e{} & X({})", current_sequence[i], combined_formula);
                         }
 
                         // 给 combined_formula 添加 ! 外围
@@ -441,7 +442,7 @@ impl Strategy for StrategyTRTA {
                         formulas.join(" & ").to_string()
                     };
 
-                    println!("Combined formula: {}", combined_formula);
+                    // println!("Combined formula: {}", combined_formula);
 
                     // // 如果当前执行的更新为最后一个更新，但是无效，此时学习不到任何约束，但仍需阻止当前更新序列
                     // if self.groups.len() == current_sequence.len() + 1 {
@@ -483,24 +484,26 @@ impl Strategy for StrategyTRTA {
                     // println!("Generated LTL Prefix: {}", prefix);
                     let prefix = "True".to_string();
                     //(prefix -> (combined_formula)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
-                    ltl_string =
-                        format!("(({}) -> ({})) & {}", prefix, combined_formula, ltl_string);
+                    ltl_string = format!("({}) & {}", combined_formula, ltl_string);
                     let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
                     println!("aalta_input: {}", aalta_input);
+                    let mut file = File::create("aalta_input.txt").unwrap();
+                    file.write_all(aalta_input.as_bytes()).unwrap();
+                    file.flush().unwrap();
                     //新建子线程
                     let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
                         .arg("-e")
-                        .stdin(Stdio::piped())
+                        // .stdin(Stdio::piped())
                         .stdout(Stdio::piped())
                         .spawn()
                         .expect("Failed to start process");
 
-                    {
-                        // 获取子进程的标准输入(aalta_input)
-                        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-                        stdin.write_all(aalta_input.as_bytes()).expect("Failed to write to stdin");
-                        stdin.flush().expect("Failed to flush stdin");
-                    }
+                    // {
+                    //     // 获取子进程的标准输入(aalta_input)
+                    //     let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+                    //     stdin.write_all(aalta_input.as_bytes()).expect("Failed to write to stdin");
+                    //     stdin.flush().expect("Failed to flush stdin");
+                    // }
                     println!("Finish aalta input!");
                     let output = child.stdout.take().expect("Failed to open stdout");
                     println!("Begin aalta output!");
@@ -508,15 +511,15 @@ impl Strategy for StrategyTRTA {
                     let mut output_str = String::new();
                     let mut reader = BufReader::new(output);
                     reader.read_to_string(&mut output_str).expect("Failed to read stdout");
-                    println!("Output: {}", output_str);
+                    // println!("Output: {}", output_str);
 
                     // 对aalta的输出进行解析
                     let lines: Vec<&str> = output_str.lines().collect();
                     // let mut indices = Vec::new();
                     // 检查结果是否为sat
-                    if lines.len() > 1 && lines[1].trim() == "sat" {
+                    if lines.len() > 1 && lines[0].trim() == "sat" {
                         // 对从第三行之后的结果进行处理
-                        for line in lines.iter().skip(2) {
+                        for line in lines.iter().skip(1) {
                             // skip first two lines (header and "sat")
                             // 按，分片
                             for part in line.split(",") {
@@ -661,7 +664,7 @@ impl Strategy for StrategyTRTA {
                         combined_formula_from_loop.join(" & ").to_string()
                     };
 
-                    println!("combined_formula_form_loops: {}", combined_formula_form_loops);
+                    // println!("combined_formula_form_loops: {}", combined_formula_form_loops);
 
                     // // 如果当前执行的更新为最后一个更新，但是无效，此时学习不到任何约束，但仍需阻止当前更新序列
                     // if self.groups.len() == current_sequence.len() + 1 {
@@ -732,7 +735,7 @@ impl Strategy for StrategyTRTA {
                     let mut output_str = String::new();
                     let mut reader = BufReader::new(output);
                     reader.read_to_string(&mut output_str).expect("Failed to read stdout");
-                    println!("Output: {}", output_str);
+                    // println!("Output: {}", output_str);
 
                     // 对aalta的输出进行解析
                     let lines: Vec<&str> = output_str.lines().collect();
