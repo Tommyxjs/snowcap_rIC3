@@ -280,22 +280,38 @@ impl Strategy for StrategyTRTA {
         let mut formula_parts = Vec::new();
 
         //for i in 0..frame.rem_groups.len() {
+        // 24.1.9 for i in 0..self.groups.len() {
         for i in 0..self.groups.len() {
             let mut negations = Vec::new();
             for j in 0..self.groups.len() {
+                // for j in 0..self.groups.len() {
                 if i != j {
-                    negations.push(format!("!x{}", j));
+                    negations.push(format!("! x{}", j));
                 }
             }
-            let formula = format!("G(x{} -> {})", i, negations.join(" & "));
+            // let formula = format!("G(x{} -> ({}))", i, negations.join(" & "));
+            let formula = format!("G((x{} & {}) <-> (e{}))", i, negations.join(" & "), i);
             formula_parts.push(formula);
         }
         let mut always_formula_parts = formula_parts.join(" & ");
         always_formula_parts.push_str(&format!(
-            "{}\n",
-            (0..self.groups.len()).map(|i| format!("& F x{}", i)).collect::<Vec<_>>().join(" ")
+            " & G({}) & {}\n",
+            (0..self.groups.len())
+                .map(|i| format!("((e{}) & N(G(! e{})))", i, i))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            (0..self.groups.len() - 1).fold("true".to_string(), |acc, _| format!("X({})", acc))
         ));
-        // println!("formula_parts: {:?}", always_formula_parts);
+        // always_formula_parts.push_str(&format!(
+        //     "{}\n",
+        //     (0..20).map(|i| format!("& (F (x{}))", i)).collect::<Vec<_>>().join(" ")
+        // ));
+
+        // always_formula_parts.push_str(&format!(
+        //     "{}\n",
+        //     (0..self.groups.len()).map(|i| format!("& (F (x{}))", i)).collect::<Vec<_>>().join(" ")
+        // ));
+        println!("formula_parts: {:?}", always_formula_parts);
 
         loop {
             // check for iter overflow检查时间是否已耗尽（即处理时间是否超时）
@@ -393,7 +409,7 @@ impl Strategy for StrategyTRTA {
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
                             {
                                 let formula = format!(
-                                    "!(!x{:?} U x{:?})",
+                                    "! (! x{:?} U x{:?})",
                                     index,
                                     *frame.rem_groups.get(frame.idx).unwrap()
                                 );
@@ -470,7 +486,7 @@ impl Strategy for StrategyTRTA {
                     ltl_string =
                         format!("(({}) -> ({})) & {}", prefix, combined_formula, ltl_string);
                     let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
-                    // println!("aalta_input: {}", aalta_input);
+                    println!("aalta_input: {}", aalta_input);
                     //新建子线程
                     let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
                         .arg("-e")
@@ -608,7 +624,7 @@ impl Strategy for StrategyTRTA {
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
                             {
                                 let formula = format!(
-                                    "!(!x{:?} U x{:?})",
+                                    "! (! x{:?} U x{:?})",
                                     index,
                                     *frame.rem_groups.get(frame.idx).unwrap()
                                 );

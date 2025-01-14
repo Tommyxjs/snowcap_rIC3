@@ -4,7 +4,7 @@ import re
 import os
 
 directory = './eval_sigcomm2021/topology_zoo/'
-output_file = 'experiment_results.txt'
+output_file = 'experiment_results_cdcl.txt'
 
 # 确保输出文件是空的，或者创建新的
 with open(output_file, 'w') as f:
@@ -31,7 +31,8 @@ for filename in os.listdir(directory):
             output = stdout.strip()  # 获取标准输出的结果
 
             # 查找包含 '代码运行时间:' 的行，并提取后面的数字
-            match = re.search(r'代码运行时间:\s*(\d+\.?\d*)', output)
+            match = re.search(r'代码运行时间:\s*(.*)', output)
+
 
             if match:
                 runtime = match.group(1)  # 获取运行时间数字
