@@ -1,0 +1,4 @@
+Filename	Runtime
+GtsPoland.gml	-1
+Cwix.gml	196.308856ms
+Singaren.gml	5.612848ms

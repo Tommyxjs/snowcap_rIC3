@@ -29,10 +29,12 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::string;
+use std::sync::mpsc;
+use std::thread;
 
 use log::*;
 use rand::prelude::*;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use utils::fmt_err;
 
 /// # One Strategy To Rule Them All
@@ -312,7 +314,7 @@ impl Strategy for StrategyTRTA {
         //     "{}\n",
         //     (0..self.groups.len()).map(|i| format!("& (F (x{}))", i)).collect::<Vec<_>>().join(" ")
         // ));
-        println!("formula_parts: {:?}", always_formula_parts);
+        // println!("formula_parts: {:?}", always_formula_parts);
 
         loop {
             // check for iter overflow检查时间是否已耗尽（即处理时间是否超时）
@@ -486,17 +488,62 @@ impl Strategy for StrategyTRTA {
                     //(prefix -> (combined_formula)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
                     ltl_string = format!("({}) & {}", combined_formula, ltl_string);
                     let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
-                    println!("aalta_input: {}", aalta_input);
+                    // println!("aalta_input: {}", aalta_input);
                     let mut file = File::create("aalta_input.txt").unwrap();
                     file.write_all(aalta_input.as_bytes()).unwrap();
                     file.flush().unwrap();
+
                     //新建子线程
-                    let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
-                        .arg("-e")
-                        // .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .spawn()
-                        .expect("Failed to start process");
+                    let timeout = Duration::new(5, 0);
+                    let (tx, rx) = mpsc::channel();
+
+                    let handle = thread::spawn(move || {
+                        let mut child = Command::new("/home/xu/Documents/aaltaf/aaltaf") // 替换为你的可执行文件名
+                            .arg("-e")
+                            .stdout(Stdio::piped())
+                            .spawn()
+                            .expect("Failed to start process");
+
+                        let output = child.stdout.take().expect("Failed to open stdout");
+                        let mut output_str = String::new();
+                        let mut reader = BufReader::new(output);
+                        reader.read_to_string(&mut output_str).expect("Failed to read stdout");
+
+                        // 将子进程的输出发送到主线程
+                        tx.send(output_str).expect("Failed to send output");
+                    });
+                    let start_time = Instant::now();
+                    // 主线程等待 5分钟或子进程输出
+                    let result = loop {
+                        // 检查是否超时
+                        if start_time.elapsed() >= timeout {
+                            println!("Timeout reached, returning unsat.");
+                            return Err(Error::Timeout);
+                            // 如果超时，发送 unsat 并退出
+                            break "unsat".to_string();
+                        }
+
+                        // 检查子进程是否已经返回结果
+                        match rx.try_recv() {
+                            Ok(output_str) => {
+                                println!("Process output: {}", output_str);
+                                break output_str; // 返回子进程的输出
+                            }
+                            Err(_) => {
+                                // 如果没有收到消息，继续循环，等待超时或子进程结果
+                                thread::sleep(Duration::from_millis(100)); // 避免 CPU 占用过高
+                            }
+                        }
+                    };
+
+                    // let mut child = Command::new(
+                    //     "/public/home/jwli/workSpace/xjs/sigcomm_exp_24/aaltaf/aaltaf",
+                    // ) // 替换为你的可执行文件名
+                    // .arg("-e")
+                    // // .stdin(Stdio::piped())
+                    // .stdout(Stdio::piped())
+                    // .spawn()
+                    // .expect("Failed to start process");
 
                     // {
                     //     // 获取子进程的标准输入(aalta_input)
@@ -505,16 +552,18 @@ impl Strategy for StrategyTRTA {
                     //     stdin.flush().expect("Failed to flush stdin");
                     // }
                     // println!("Finish aalta input!");
-                    let output = child.stdout.take().expect("Failed to open stdout");
+                    // let output = child.stdout.take().expect("Failed to open stdout");
                     // println!("Begin aalta output!");
                     // 使用 BufReader 来读取输出
-                    let mut output_str = String::new();
-                    let mut reader = BufReader::new(output);
-                    reader.read_to_string(&mut output_str).expect("Failed to read stdout");
+                    // let mut output_str = String::new();
+                    // let mut reader = BufReader::new(output);
+                    // reader
+                    //     .read_to_string(&mut output_str)
+                    //     .expect("Failed to read stdout");
                     // println!("Output: {}", output_str);
 
                     // 对aalta的输出进行解析
-                    let lines: Vec<&str> = output_str.lines().collect();
+                    let lines: Vec<&str> = result.lines().collect();
                     // let mut indices = Vec::new();
                     // 检查结果是否为sat
                     if lines.len() > 1 && lines[0].trim() == "sat" {
@@ -550,12 +599,13 @@ impl Strategy for StrategyTRTA {
                         println!("Extracted indices: {:?}", indices);
                     } else {
                         println!("Second line is not 'sat', skipping extraction.");
+                        return Err(Error::ProbablyNoSafeOrdering);
                     }
                     // 等待子进程完成
-                    let exit_status = child.wait().expect("Child process wasn't running");
+                    // let exit_status = child.wait().expect("Child process wasn't running");
 
                     // 打印子进程的退出状态
-                    println!("Child exited with status: {}", exit_status);
+                    // println!("Child exited with status: {}", exit_status);
 
                     // // 直接退出主进程
                     // std::process::exit(exit_status.code().unwrap_or(1));
@@ -714,13 +764,61 @@ impl Strategy for StrategyTRTA {
                     let mut file = File::create("aalta_input.txt").unwrap();
                     file.write_all(aalta_input.as_bytes()).unwrap();
                     file.flush().unwrap();
+
+                    //time
+                    let start_time = Instant::now();
+
                     //新建子线程
-                    let mut child = Command::new("../../../aaltaf/aaltaf") // 替换为你的可执行文件名
-                        .arg("-e")
-                        // .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .spawn()
-                        .expect("Failed to start process");
+                    let timeout = Duration::new(5, 0);
+                    let (tx, rx) = mpsc::channel();
+
+                    let handle = thread::spawn(move || {
+                        let mut child = Command::new("/home/xu/Documents/aaltaf/aaltaf") // 替换为你的可执行文件名
+                            .arg("-e")
+                            .stdout(Stdio::piped())
+                            .spawn()
+                            .expect("Failed to start process");
+
+                        let output = child.stdout.take().expect("Failed to open stdout");
+                        let mut output_str = String::new();
+                        let mut reader = BufReader::new(output);
+                        reader.read_to_string(&mut output_str).expect("Failed to read stdout");
+
+                        // 将子进程的输出发送到主线程
+                        tx.send(output_str).expect("Failed to send output");
+                    });
+                    let start_time = Instant::now();
+                    // 主线程等待 5分钟或子进程输出
+                    let result = loop {
+                        // 检查是否超时
+                        if start_time.elapsed() >= timeout {
+                            println!("Timeout reached, returning unsat.");
+                            return Err(Error::Timeout);
+                            // 如果超时，发送 unsat 并退出
+                            break "unsat".to_string();
+                        }
+
+                        // 检查子进程是否已经返回结果
+                        match rx.try_recv() {
+                            Ok(output_str) => {
+                                println!("Process output: {}", output_str);
+                                break output_str; // 返回子进程的输出
+                            }
+                            Err(_) => {
+                                // 如果没有收到消息，继续循环，等待超时或子进程结果
+                                thread::sleep(Duration::from_millis(100)); // 避免 CPU 占用过高
+                            }
+                        }
+                    };
+
+                    // let mut child = Command::new(
+                    //     "/public/home/jwli/workSpace/xjs/sigcomm_exp_24/aaltaf/aaltaf",
+                    // ) // 替换为你的可执行文件名
+                    // .arg("-e")
+                    // // .stdin(Stdio::piped())
+                    // .stdout(Stdio::piped())
+                    // .spawn()
+                    // .expect("Failed to start process");
 
                     // {
                     //     // 获取子进程的标准输入(aalta_input)
@@ -729,16 +827,18 @@ impl Strategy for StrategyTRTA {
                     //     stdin.flush().expect("Failed to flush stdin");
                     // }
                     // println!("Finish aalta input!");
-                    let output = child.stdout.take().expect("Failed to open stdout");
+                    //let output = child.stdout.take().expect("Failed to open stdout");
                     // println!("Begin aalta output!");
                     // 使用 BufReader 来读取输出
-                    let mut output_str = String::new();
-                    let mut reader = BufReader::new(output);
-                    reader.read_to_string(&mut output_str).expect("Failed to read stdout");
-                    println!("Output: {}", output_str);
+                    //let mut output_str = String::new();
+                    //let mut reader = BufReader::new(output);
+                    // reader
+                    //     .read_to_string(&mut output_str)
+                    //     .expect("Failed to read stdout");
+                    // println!("Output: {}", output_str);
 
                     // 对aalta的输出进行解析
-                    let lines: Vec<&str> = output_str.lines().collect();
+                    let lines: Vec<&str> = result.lines().collect();
                     // let mut indices = Vec::new();
                     // 检查结果是否为sat
                     if lines.len() > 1 && lines[0].trim() == "sat" {
@@ -769,14 +869,14 @@ impl Strategy for StrategyTRTA {
                                 }
                             }
                         }
-
                         // 输出解析出来的更新序列
                         // println!("Extracted indices: {:?}", indices);
                     } else {
                         println!("Second line is not 'sat', skipping extraction.");
+                        return Err(Error::ProbablyNoSafeOrdering);
                     }
-                    // 等待子进程完成
-                    let exit_status = child.wait().expect("Child process wasn't running");
+                    // // 等待子进程完成
+                    // let exit_status = child.wait().expect("Child process wasn't running");
 
                     // 打印子进程的退出状态
                     // println!("Child exited with status: {}", exit_status);
