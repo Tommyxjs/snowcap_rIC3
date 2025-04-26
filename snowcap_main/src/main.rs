@@ -41,7 +41,6 @@ use transient_violation::*;
 fn main() -> Result<(), Box<dyn Error>> {
     // run clap
     let args = CommandLineArguments::parse();
-    let start = Instant::now();
     // match on the action
     match args.cmd {
         MainCommand::TransientViolation {
@@ -103,6 +102,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
         MainCommand::Synthesize { network, use_tree } => {
+            let start = Instant::now();
             // initialize the env logger
             pretty_env_logger::init();
             // get the network
@@ -143,6 +143,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .collect::<Vec<_>>()
                     .join("\n    "),
             );
+            let duration = start.elapsed();
+            println!("代码运行时间: {:?}", duration);
         }
         MainCommand::Runtime {
             network,
@@ -204,8 +206,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             bench(net, final_config, hard_policy, scenario, args)?;
         }
     }
-    let duration = start.elapsed();
-    println!("代码运行时间: {:?}", duration);
+    // let duration = start.elapsed();
+    // println!("代码运行时间: {:?}", duration);
     Ok(())
 }
 

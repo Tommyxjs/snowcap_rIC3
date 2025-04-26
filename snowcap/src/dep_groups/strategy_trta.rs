@@ -25,7 +25,7 @@ use crate::netsim::{Network, NetworkError, RouterId};
 use crate::strategies::{PushBackTreeStrategy, Strategy};
 use crate::{Error, Stopper};
 use std::fmt::format;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::string;
@@ -222,7 +222,7 @@ impl Strategy for StrategyTRTA {
         let mut groups: Vec<Vec<ConfigModifier>> = Vec::with_capacity(modifiers.len());
         for modifier in modifiers {
             groups.push(vec![modifier]);
-            //println!("groups: {:?}", groups);
+            // println!("groups: {:?}", groups);
         }
 
         // prepare the timings
@@ -254,6 +254,8 @@ impl Strategy for StrategyTRTA {
 
         // 创建一个空的 Vec 来存储(source, target)元组对
         let mut session_pairs = Vec::new();
+        let mut in_session_pairs = Vec::new();
+        let mut re_session_pairs = Vec::new();
 
         // 迭代 modifiers，提取 source 和 target
         let first_modifiers: Vec<ConfigModifier> = self
@@ -262,12 +264,19 @@ impl Strategy for StrategyTRTA {
             .filter_map(|group| group.first().cloned()) // 获取每个group的第一个modifier
             .collect();
         // println!("first_modifiers: {:?}", first_modifiers);
-        for modifier in &first_modifiers {
+        for (index, modifier) in first_modifiers.iter().enumerate() {
             match modifier {
                 // 处理 Remove 和 Insert 两种情况
-                ConfigModifier::Remove(BgpSession { source, target, .. })
-                | ConfigModifier::Insert(BgpSession { source, target, .. }) => {
-                    // 将 (source, target) 元组加入到列表中
+                ConfigModifier::Insert(BgpSession { source, target, .. }) => {
+                    in_session_pairs.push(index);
+                    session_pairs.push((*source, *target));
+                }
+                ConfigModifier::Remove(BgpSession { source, target, .. }) => {
+                    re_session_pairs.push(index);
+                    session_pairs.push((*source, *target));
+                }
+                ConfigModifier::Update { to: BgpSession { source, target, .. }, .. } => {
+                    in_session_pairs.push(index);
                     session_pairs.push((*source, *target));
                 }
                 _ => {}
@@ -275,7 +284,9 @@ impl Strategy for StrategyTRTA {
         }
 
         //打印出生成的列表
-        // println!("Session pairs: {:?}", session_pairs);
+        println!("Session pairs: {:?}", session_pairs);
+        println!("in_session_pairs: {:?}", in_session_pairs);
+        println!("re_session_pairs: {:?}", re_session_pairs);
 
         //最终目的是产生aalta_input，送进aalta中，但是循环的是ltl_string
         let mut ltl_string = "True".to_string();
@@ -333,7 +344,7 @@ impl Strategy for StrategyTRTA {
             // get the latest stack frame获取当前堆栈帧（用于管理待处理的组）
             let frame = match stack.last_mut() {
                 Some(frame) => {
-                    // println!("Current frame: {:?}", frame);
+                    println!("Current frame: {:?}", frame);
                     frame
                 }
                 None => {
@@ -407,9 +418,10 @@ impl Strategy for StrategyTRTA {
                         println!("Matched session indices: {:?}", matched_indices);
                         //每次取出来，如果不等于已经执行的更新，添加约束
                         for &index in &matched_indices {
-                            // 确保 index 不等于 current_sequence 中的任何一项，并且不等于 frame.rem_groups.get(0)
+                            // 确保 index 不等于 current_sequence 中的任何一项，并且不等于 frame.rem_groups.get(0)并且是一个插入类型的更新
                             if !(current_sequence.contains(&index)
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
+                                && in_session_pairs.contains(&index)
                             {
                                 let formula = format!("N(G(! e{:?}))", index);
                                 node_formulas.push(formula);
@@ -488,13 +500,16 @@ impl Strategy for StrategyTRTA {
                     //(prefix -> (combined_formula)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
                     ltl_string = format!("({}) & {}", combined_formula, ltl_string);
                     let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
-                    // println!("aalta_input: {}", aalta_input);
-                    let mut file = File::create("aalta_input.txt").unwrap();
+                    println!("aalta_input: {}", aalta_input);
+                    let mut file = File::create(
+                        "/home/xu/Documents/snowcap-CDCL/target/debug/aalta_input.txt",
+                    )
+                    .unwrap();
                     file.write_all(aalta_input.as_bytes()).unwrap();
                     file.flush().unwrap();
 
                     //新建子线程
-                    let timeout = Duration::new(5, 0);
+                    let timeout = Duration::new(60, 0);
                     let (tx, rx) = mpsc::channel();
 
                     let handle = thread::spawn(move || {
@@ -566,9 +581,15 @@ impl Strategy for StrategyTRTA {
                     let lines: Vec<&str> = result.lines().collect();
                     // let mut indices = Vec::new();
                     // 检查结果是否为sat
-                    if lines.len() > 1 && lines[0].trim() == "sat" {
+                    // if lines.len() > 1 && lines[0].trim() == "sat" {
+                    if lines[0].trim() == "sat" {
                         // 对从第三行之后的结果进行处理
-                        for line in lines.iter().skip(1) {
+                        let aalta_output_path =
+                            "/home/xu/Documents/snowcap-CDCL/target/debug/output_to_file.txt";
+                        let content =
+                            fs::read_to_string(aalta_output_path).expect("Failed to read file");
+                        let aalta_output: Vec<&str> = content.lines().collect();
+                        for line in aalta_output.iter() {
                             // skip first two lines (header and "sat")
                             // 按，分片
                             for part in line.split(",") {
@@ -675,6 +696,7 @@ impl Strategy for StrategyTRTA {
                             // 确保 index 不等于 current_sequence 中的任何一项，并且不等于 frame.rem_groups.get(0)
                             if !(current_sequence.contains(&index)
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
+                                && in_session_pairs.contains(&index)
                             {
                                 let formula = format!("N(G(! e{:?}))", index);
                                 node_formulas.push(formula);
@@ -760,8 +782,11 @@ impl Strategy for StrategyTRTA {
                     //(prefix -> (combined_formula_form_loops)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
                     ltl_string = format!("({}) & {}", combined_formula_form_loops, ltl_string);
                     let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
-                    // println!("aalta_input: {}", aalta_input);
-                    let mut file = File::create("aalta_input.txt").unwrap();
+                    println!("aalta_input: {}", aalta_input);
+                    let mut file = File::create(
+                        "/home/xu/Documents/snowcap-CDCL/target/debug/aalta_input.txt",
+                    )
+                    .unwrap();
                     file.write_all(aalta_input.as_bytes()).unwrap();
                     file.flush().unwrap();
 
@@ -769,7 +794,7 @@ impl Strategy for StrategyTRTA {
                     let start_time = Instant::now();
 
                     //新建子线程
-                    let timeout = Duration::new(5, 0);
+                    let timeout = Duration::new(30, 0);
                     let (tx, rx) = mpsc::channel();
 
                     let handle = thread::spawn(move || {
