@@ -24,6 +24,8 @@ use crate::netsim::config::{ConfigExpr::BgpSession, ConfigModifier};
 use crate::netsim::{Network, NetworkError, RouterId};
 use crate::strategies::{PushBackTreeStrategy, Strategy};
 use crate::{Error, Stopper};
+use petgraph::matrix_graph::NodeIndex;
+use std::collections::HashMap;
 use std::fmt::format;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -256,6 +258,7 @@ impl Strategy for StrategyTRTA {
         let mut session_pairs = Vec::new();
         let mut in_session_pairs = Vec::new();
         let mut re_session_pairs = Vec::new();
+        let mut mo_session_pairs = Vec::new();
 
         // 迭代 modifiers，提取 source 和 target
         let first_modifiers: Vec<ConfigModifier> = self
@@ -276,17 +279,34 @@ impl Strategy for StrategyTRTA {
                     session_pairs.push((*source, *target));
                 }
                 ConfigModifier::Update { to: BgpSession { source, target, .. }, .. } => {
-                    in_session_pairs.push(index);
+                    mo_session_pairs.push(index);
                     session_pairs.push((*source, *target));
                 }
                 _ => {}
             }
         }
 
+        let mut router_counts: HashMap<NodeIndex<u32>, usize> = HashMap::new();
+        let total_mo_pairs = mo_session_pairs.len();
+
+        for &session_idx in &mo_session_pairs {
+            let (src_router, tgt_router) = session_pairs[session_idx];
+            *router_counts.entry(src_router).or_insert(0) += 1;
+            *router_counts.entry(tgt_router).or_insert(0) += 1;
+        }
+
+        // 查找唯一一个在每个 mo_session_pair 中都出现的路由器：即路由反射器
+        let reflector_router = router_counts
+            .iter()
+            .find(|&(_, &count)| count == total_mo_pairs)
+            .map(|(router, _)| *router);
+
         //打印出生成的列表
-        println!("Session pairs: {:?}", session_pairs);
-        println!("in_session_pairs: {:?}", in_session_pairs);
-        println!("re_session_pairs: {:?}", re_session_pairs);
+        // println!("Session pairs: {:?}", session_pairs);
+        // println!("in_session_pairs: {:?}", in_session_pairs);
+        // println!("re_session_pairs: {:?}", re_session_pairs);
+        // println!("mo_session_pairs: {:?}", mo_session_pairs);
+        // println!("reflector_router: {:?}", reflector_router);
 
         //最终目的是产生aalta_input，送进aalta中，但是循环的是ltl_string
         let mut ltl_string = "True".to_string();
@@ -344,7 +364,7 @@ impl Strategy for StrategyTRTA {
             // get the latest stack frame获取当前堆栈帧（用于管理待处理的组）
             let frame = match stack.last_mut() {
                 Some(frame) => {
-                    println!("Current frame: {:?}", frame);
+                    // println!("Current frame: {:?}", frame);
                     frame
                 }
                 None => {
@@ -405,6 +425,7 @@ impl Strategy for StrategyTRTA {
                     let mut formulas = Vec::new();
 
                     for node in check_idx.iter() {
+                        println!("node {:?}", node);
                         let mut node_formulas = Vec::new();
                         //遍历有问题的节点
                         let mut matched_indices: Vec<usize> = Vec::new(); //把涉及有问题节点的更新的下标取出来
@@ -421,10 +442,55 @@ impl Strategy for StrategyTRTA {
                             // 确保 index 不等于 current_sequence 中的任何一项，并且不等于 frame.rem_groups.get(0)并且是一个插入类型的更新
                             if !(current_sequence.contains(&index)
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
-                                && in_session_pairs.contains(&index)
                             {
-                                let formula = format!("N(G(! e{:?}))", index);
-                                node_formulas.push(formula);
+                                if in_session_pairs.contains(&index) {
+                                    let formula = format!("N(G(! e{:?}))", index);
+                                    node_formulas.push(formula);
+                                } else if mo_session_pairs.contains(&index) {
+                                    let formula = format!("N(G(! e{:?}))", index);
+                                    node_formulas.push(formula);
+                                    // 获取边界路由器（与 node 不同的那一个）
+                                    let (source_router, target_router) =
+                                        session_pairs[*frame.rem_groups.get(frame.idx).unwrap()];
+                                    let border_router = if source_router == *node {
+                                        target_router
+                                    } else {
+                                        source_router
+                                    };
+                                    if let Some(reflector_router) = reflector_router {
+                                        // 在 mo_session_pairs 中寻找是否存在 (border_router, reflector_router) 或其反向
+                                        let mut related_update_index: usize = 0;
+                                        let mut found = false;
+
+                                        for &mo_index in &mo_session_pairs {
+                                            let (s, t) = session_pairs[mo_index];
+                                            if (s == border_router && t == reflector_router)
+                                                || (s == reflector_router && t == border_router)
+                                            {
+                                                related_update_index = mo_index;
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+
+                                        if found {
+                                            println!(
+                                                "Found matching MO session update between border router {:?} and reflector {:?} at index {}",
+                                                border_router, reflector_router, related_update_index
+                                            );
+
+                                            // 你可以在这里进行进一步操作，比如记录、构造公式等
+                                            let formula =
+                                                format!("N(G(! e{:?}))", related_update_index);
+                                            node_formulas.push(formula);
+                                        } else {
+                                            println!(
+                                                "No matching update found for border router {:?} and reflector {:?}",
+                                                border_router, reflector_router
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                         if !node_formulas.is_empty() {
@@ -509,7 +575,7 @@ impl Strategy for StrategyTRTA {
                     file.flush().unwrap();
 
                     //新建子线程
-                    let timeout = Duration::new(60, 0);
+                    let timeout = Duration::new(120, 0);
                     let (tx, rx) = mpsc::channel();
 
                     let handle = thread::spawn(move || {
@@ -794,7 +860,7 @@ impl Strategy for StrategyTRTA {
                     let start_time = Instant::now();
 
                     //新建子线程
-                    let timeout = Duration::new(30, 0);
+                    let timeout = Duration::new(120, 0);
                     let (tx, rx) = mpsc::channel();
 
                     let handle = thread::spawn(move || {
