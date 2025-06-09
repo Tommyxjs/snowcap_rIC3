@@ -1,0 +1,33 @@
+read -sv -formal HDL.sv
+prep -flatten -nordff -top OneHotLatch
+chformal -early
+
+hierarchy -smtcheck
+rename -witness
+write_rtlil design.il
+
+scc -select; simplemap; select -clear
+memory_nordff
+async2sync
+chformal -assume -early
+opt_clean
+formalff -clk2ff -hierarchy
+chformal -live -fair -cover -remove
+opt_clean
+check
+setundef -undriven -zero -init -params
+opt_expr #opt -fast
+rename -witness
+opt_clean
+write_rtlil design_prep.il
+techmap
+memory_map -formal
+formalff -clk2ff
+simplemap
+dffunmap
+opt_clean
+write_rtlil design_aiger.il
+abc -g AND
+stat
+clean -purge
+write_aiger -zinit -vmap design_aiger.aim -ywmap design_aiger.ywa -ascii -symbols design_aiger.aag

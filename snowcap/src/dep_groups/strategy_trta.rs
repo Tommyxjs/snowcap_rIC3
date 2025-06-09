@@ -25,10 +25,11 @@ use crate::netsim::{Network, NetworkError, RouterId};
 use crate::strategies::{PushBackTreeStrategy, Strategy};
 use crate::{Error, Stopper};
 use petgraph::matrix_graph::NodeIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::format;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::string;
 use std::sync::mpsc;
@@ -312,6 +313,7 @@ impl Strategy for StrategyTRTA {
         let mut ltl_string = "True".to_string();
         //构建每个状态只能做一个update的约束
         let mut formula_parts = Vec::new();
+        let mut constraints: Vec<(Vec<usize>, usize)> = vec![];
 
         //for i in 0..frame.rem_groups.len() {
         // 24.1.9 for i in 0..self.groups.len() {
@@ -422,11 +424,11 @@ impl Strategy for StrategyTRTA {
                 }
                 Err(NetworkError::ForwardingBlackHole(check_idx)) => {
                     println!("Now we have the Extracted NodeIndices: {:?}", check_idx);
-                    let mut formulas = Vec::new();
-
+                    // let mut formulas = Vec::new();
                     for node in check_idx.iter() {
                         println!("node {:?}", node);
-                        let mut node_formulas = Vec::new();
+                        // let mut node_formulas = Vec::new();
+                        let mut selected_indices = Vec::new();
                         //遍历有问题的节点
                         let mut matched_indices: Vec<usize> = Vec::new(); //把涉及有问题节点的更新的下标取出来
                                                                           // 遍历 session_pairs 并检查是否匹配
@@ -444,11 +446,13 @@ impl Strategy for StrategyTRTA {
                                 || (0..=frame.idx).any(|i| frame.rem_groups.get(i) == Some(&index)))
                             {
                                 if in_session_pairs.contains(&index) {
-                                    let formula = format!("N(G(! e{:?}))", index);
-                                    node_formulas.push(formula);
+                                    selected_indices.push(index);
+                                    // let formula = format!("N(G(! e{:?}))", index);
+                                    // node_formulas.push(formula);
                                 } else if mo_session_pairs.contains(&index) {
-                                    let formula = format!("N(G(! e{:?}))", index);
-                                    node_formulas.push(formula);
+                                    // let formula = format!("N(G(! e{:?}))", index);
+                                    // node_formulas.push(formula);
+                                    selected_indices.push(index);
                                     // 获取边界路由器（与 node 不同的那一个）
                                     let (source_router, target_router) =
                                         session_pairs[*frame.rem_groups.get(frame.idx).unwrap()];
@@ -480,9 +484,10 @@ impl Strategy for StrategyTRTA {
                                             );
 
                                             // 你可以在这里进行进一步操作，比如记录、构造公式等
-                                            let formula =
-                                                format!("N(G(! e{:?}))", related_update_index);
-                                            node_formulas.push(formula);
+                                            // let formula =
+                                            //     format!("N(G(! e{:?}))", related_update_index);
+                                            // node_formulas.push(formula);
+                                            selected_indices.push(related_update_index);
                                         } else {
                                             println!(
                                                 "No matching update found for border router {:?} and reflector {:?}",
@@ -493,34 +498,39 @@ impl Strategy for StrategyTRTA {
                                 }
                             }
                         }
-                        if !node_formulas.is_empty() {
+                        if !selected_indices.is_empty() {
                             // 将每个 node 的公式用括号包裹，并连接起来
-                            let combined_node_formula = format!(
-                                "G(e{} -> ({}))",
+                            // let combined_node_formula = format!(
+                            //     "G(e{} -> ({}))",
+                            //     *frame.rem_groups.get(frame.idx).unwrap(),
+                            //     node_formulas.join(" | ")
+                            // );
+                            // formulas.push(combined_node_formula); // 添加到总公式集合
+                            constraints.push((
+                                selected_indices.clone(),
                                 *frame.rem_groups.get(frame.idx).unwrap(),
-                                node_formulas.join(" | ")
-                            );
-                            formulas.push(combined_node_formula); // 添加到总公式集合
+                            ));
                         }
                     }
+                    println!("{:?}", constraints);
 
                     //如果formulas为空，那么要么在没做的更新里面没有直连的bgp session可以解决问题，没做的更新集合为空
-                    let combined_formula = if formulas.is_empty() {
-                        // 初始化 combined_formula
-                        let mut combined_formula =
-                            format!("e{}", *frame.rem_groups.get(frame.idx).unwrap());
+                    // let combined_formula = if formulas.is_empty() {
+                    //     // 初始化 combined_formula
+                    //     let mut combined_formula =
+                    //         format!("e{}", *frame.rem_groups.get(frame.idx).unwrap());
 
-                        // 从倒数第二个元素到第一个元素构建 LTL 表达式
-                        for i in (0..current_sequence.len()).rev() {
-                            combined_formula =
-                                format!("e{} & X({})", current_sequence[i], combined_formula);
-                        }
+                    //     // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                    //     for i in (0..current_sequence.len()).rev() {
+                    //         combined_formula =
+                    //             format!("e{} & X({})", current_sequence[i], combined_formula);
+                    //     }
 
-                        // 给 combined_formula 添加 ! 外围
-                        format!("!({})", combined_formula)
-                    } else {
-                        formulas.join(" & ").to_string()
-                    };
+                    //     // 给 combined_formula 添加 ! 外围
+                    //     format!("!({})", combined_formula)
+                    // } else {
+                    //     formulas.join(" & ").to_string()
+                    // };
 
                     // println!("Combined formula: {}", combined_formula);
 
@@ -544,78 +554,278 @@ impl Strategy for StrategyTRTA {
                     // }
 
                     // 构造LTL公式的条件
-                    let prefix = if current_sequence.is_empty() {
-                        "True".to_string()
-                    } else {
-                        // 初始的 LTL 表达式是 prefix 中最后一个元素
-                        let mut prefix_expr =
-                            format!("x{}", current_sequence[current_sequence.len() - 1]);
+                    // let prefix = if current_sequence.is_empty() {
+                    //     "True".to_string()
+                    // } else {
+                    //     // 初始的 LTL 表达式是 prefix 中最后一个元素
+                    //     let mut prefix_expr =
+                    //         format!("x{}", current_sequence[current_sequence.len() - 1]);
 
-                        // 从倒数第二个元素到第一个元素构建 LTL 表达式
-                        for i in (0..current_sequence.len() - 1).rev() {
-                            // 这里用 prefix_list.len() - 1
-                            prefix_expr =
-                                format!("x{} & X(F({}))", current_sequence[i], prefix_expr);
-                        }
-                        prefix_expr
-                    };
+                    //     // 从倒数第二个元素到第一个元素构建 LTL 表达式
+                    //     for i in (0..current_sequence.len() - 1).rev() {
+                    //         // 这里用 prefix_list.len() - 1
+                    //         prefix_expr =
+                    //             format!("x{} & X(F({}))", current_sequence[i], prefix_expr);
+                    //     }
+                    //     prefix_expr
+                    // };
 
                     // 打印生成的 LTL 表达式
                     // println!("Generated LTL Prefix: {}", prefix);
-                    let prefix = "True".to_string();
+                    // let prefix = "True".to_string();
                     //(prefix -> (combined_formula)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
-                    ltl_string = format!("({}) & {}", combined_formula, ltl_string);
-                    let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
-                    println!("aalta_input: {}", aalta_input);
-                    let mut file = File::create(
-                        "/home/xu/Documents/snowcap-CDCL/target/debug/aalta_input.txt",
-                    )
-                    .unwrap();
-                    file.write_all(aalta_input.as_bytes()).unwrap();
-                    file.flush().unwrap();
+                    // ltl_string = format!("({}) & {}", combined_formula, ltl_string);
+                    // let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
+                    // println!("aalta_input: {}", aalta_input);
+                    // let mut file = File::create(
+                    //     "/home/xu/Documents/snowcap-CDCL/target/debug/aalta_input.txt",
+                    // )
+                    // .unwrap();
+                    // file.write_all(aalta_input.as_bytes()).unwrap();
+                    // file.flush().unwrap();
 
-                    //新建子线程
-                    let timeout = Duration::new(120, 0);
-                    let (tx, rx) = mpsc::channel();
+                    //Generate Verilog code
+                    let mut verilog = String::new();
+                    let width = self.groups.len();
+                    println!("self.groups.len(): {}", self.groups.len());
+                    verilog.push_str(&format!(
+                        "module OneHotLatch #(\
+                )\n(\
+                    input wire clk,\n\
+                    input wire [{}:0] x,\n\
+                    output wire prop\n\
+                );\n\n",
+                        width - 1
+                    ));
 
-                    let handle = thread::spawn(move || {
-                        let mut child = Command::new("/home/xu/Documents/aaltaf/aaltaf") // 替换为你的可执行文件名
-                            .arg("-e")
-                            .stdout(Stdio::piped())
-                            .spawn()
-                            .expect("Failed to start process");
+                    verilog.push_str(&format!(
+                        "    wire valid_input;\n\
+                    wire done;\n\
+                    reg [{}:0] l;\n\
+                    reg assume_failed;\n\n",
+                        width - 1
+                    ));
 
-                        let output = child.stdout.take().expect("Failed to open stdout");
-                        let mut output_str = String::new();
-                        let mut reader = BufReader::new(output);
-                        reader.read_to_string(&mut output_str).expect("Failed to read stdout");
-
-                        // 将子进程的输出发送到主线程
-                        tx.send(output_str).expect("Failed to send output");
-                    });
-                    let start_time = Instant::now();
-                    // 主线程等待 5分钟或子进程输出
-                    let result = loop {
-                        // 检查是否超时
-                        if start_time.elapsed() >= timeout {
-                            println!("Timeout reached, returning unsat.");
-                            return Err(Error::Timeout);
-                            // 如果超时，发送 unsat 并退出
-                            break "unsat".to_string();
-                        }
-
-                        // 检查子进程是否已经返回结果
-                        match rx.try_recv() {
-                            Ok(output_str) => {
-                                println!("Process output: {}", output_str);
-                                break output_str; // 返回子进程的输出
-                            }
-                            Err(_) => {
-                                // 如果没有收到消息，继续循环，等待超时或子进程结果
-                                thread::sleep(Duration::from_millis(100)); // 避免 CPU 占用过高
+                    // 生成所需的 prev 寄存器
+                    let mut declared_prev = HashSet::new();
+                    for (befores, _) in &constraints {
+                        for &b in befores {
+                            if declared_prev.insert(b) {
+                                verilog.push_str(&format!("    reg l{}_prev;\n", b));
                             }
                         }
-                    };
+                    }
+
+                    verilog.push_str(&format!(
+                        "\n    assign valid_input = (x != 0) && ((x & (x - 1)) == 0);\n\
+                    assign done = (l == {}'b{});\n\
+                    assign prop = done;\n\
+                    wire assume_ok = !assume_failed;\n\n",
+                        width,
+                        "1".repeat(width)
+                    ));
+
+                    verilog.push_str(
+                        "    always @(*) begin\n\
+                        assume(valid_input);\n\
+                    end\n\
+                    always @(*) begin\n\
+                        assume(assume_ok);\n\
+                    end\n\n",
+                    );
+
+                    verilog.push_str(
+                        "    always @(posedge clk) begin\n\
+                        l <= l | x;\n\
+                    end\n\n",
+                    );
+
+                    // 生成顺序约束逻辑
+                    for (befores, after) in &constraints {
+                        let conds: Vec<String> =
+                            befores.iter().map(|b| format!("l{}_prev", b)).collect();
+                        let cond_str = conds.join(" || ");
+                        verilog.push_str(&format!(
+                            "    always @(posedge clk) begin\n\
+                        if (valid_input && l[{}] && !({}))\n\
+                            assume_failed <= 1;\n",
+                            after, cond_str
+                        ));
+                        for &b in befores {
+                            verilog.push_str(&format!("        l{}_prev <= l[{}];\n", b, b));
+                        }
+                        verilog.push_str("    end\n\n");
+                    }
+
+                    verilog.push_str("endmodule\n");
+
+                    // 写入文件
+                    let path = Path::new("/home/xu/Documents/ver/snowcap-CDCL/HDL.sv");
+                    let mut file = File::create(path).expect("无法创建文件");
+                    file.write_all(verilog.as_bytes()).expect("无法写入 Verilog 内容");
+
+                    // println!("✅ Verilog 文件已更新：{}", path.display());
+                    //已经生成了verilog代码，接下来yosys->rIC3->parser
+                    // Step 1: 执行 yosys generate_aiger.ys
+                    let yosys_status = Command::new("yosys")
+                        .arg("generate_aiger.ys")
+                        .current_dir("/home/xu/Documents/ver/snowcap-CDCL")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .expect("Failed to execute yosys");
+
+                    if !yosys_status.success() {
+                        eprintln!("❌ Yosys 执行失败！");
+                        std::process::exit(1);
+                    }
+
+                    // Step 2: 执行 rIC3 --witness design_aiger.aag，并捕获输出
+                    let ric3_output = Command::new("../rIC3/target/release/rIC3")
+                        .arg("--witness")
+                        .arg("design_aiger.aag")
+                        .current_dir("/home/xu/Documents/ver/snowcap-CDCL")
+                        .output()
+                        .expect("❌ Failed to execute rIC3");
+
+                    let stdout_str = String::from_utf8_lossy(&ric3_output.stdout);
+                    let stderr_str = String::from_utf8_lossy(&ric3_output.stderr);
+
+                    // Step 3: 写入日志到指定路径
+                    let log_path =
+                        Path::new("/home/xu/Documents/ver/snowcap-CDCL/output_to_file.txt");
+                    let mut log_file = File::create(log_path).expect("❌ 无法创建日志文件");
+
+                    writeln!(log_file, "=== STDOUT ===\n{}", stdout_str)
+                        .expect("❌ 写入 stdout 失败");
+                    writeln!(log_file, "\n=== STDERR ===\n{}", stderr_str)
+                        .expect("❌ 写入 stderr 失败");
+
+                    // println!("✅ rIC3 执行完成，日志已保存到: {}", log_path.display());
+
+                    // Step 4: parser，解析 STDOUT
+                    let output_content = fs::read_to_string(log_path).expect("❌ 无法读取日志文件");
+
+                    let stdout_marker = "=== STDOUT ===";
+                    let stdout_start = output_content
+                        .find(stdout_marker)
+                        .map(|idx| idx + stdout_marker.len())
+                        .expect("❌ 未找到 STDOUT 区域");
+
+                    let stdout_end =
+                        output_content.find("=== STDERR ===").unwrap_or(output_content.len());
+                    let stdout_section = &output_content[stdout_start..stdout_end];
+
+                    // Step 5: 查找 result: safe/unsafe
+                    let result_line = stdout_section
+                        .lines()
+                        .find(|line| line.trim_start().starts_with("result:"))
+                        .unwrap_or("");
+
+                    if result_line.contains("safe") || result_line.contains("unsafe") {
+                        let lines: Vec<&str> = stdout_section.lines().collect();
+                        // println!("✅ STDOUT 区域的所有行如下：");
+                        // for (i, line) in lines.iter().enumerate() {
+                        //     println!("{}: {}", i, line);
+                        // }
+
+                        // 提取 witness 比特串：从第一个全0行之后开始，直到点符号.的前两行
+                        let mut start_index = None;
+                        let mut dot_index = None;
+
+                        for (i, line) in lines.iter().enumerate() {
+                            let trimmed = line.trim();
+                            if start_index.is_none()
+                                && !trimmed.is_empty()
+                                && trimmed.chars().all(|c| c == '0')
+                            {
+                                start_index = Some(i + 1);
+                            }
+                            if trimmed == "." {
+                                dot_index = Some(i);
+                                break;
+                            }
+                        }
+
+                        let mut extracted_lines = Vec::new();
+                        if let (Some(start), Some(dot)) = (start_index, dot_index) {
+                            let end = dot.saturating_sub(2);
+                            for i in start..=end {
+                                let line = lines[i].trim();
+                                if line.starts_with('1')
+                                    && line.chars().all(|c| c == '0' || c == '1')
+                                    && line[1..].contains('1')
+                                {
+                                    extracted_lines.push(line);
+                                }
+                            }
+                        }
+
+                        // 打印提取结果
+                        // println!("✅ 提取比特串如下:");
+                        // for line in &extracted_lines {
+                        //     println!("{}", line);
+                        // }
+
+                        // 提取比特串中除首位外 '1' 的下标
+                        for line in &extracted_lines {
+                            let bits = line.trim();
+                            if bits.len() < 2 {
+                                continue;
+                            }
+                            let tail_bits = &bits[1..];
+                            if let Some(pos) = tail_bits.chars().position(|c| c == '1') {
+                                indices.push(pos);
+                            }
+                        }
+
+                        println!("✅ 提取出的 '1' 所在下标为: {:?}", indices);
+                    } else {
+                        println!("⚠️ 未检测到 safe 或 unsafe 结果。");
+                    }
+
+                    // //新建子线程
+                    // let timeout = Duration::new(120, 0);
+                    // let (tx, rx) = mpsc::channel();
+
+                    // let handle = thread::spawn(move || {
+                    //     let mut child = Command::new("/home/xu/Documents/aaltaf/aaltaf") // 替换为你的可执行文件名
+                    //         .arg("-e")
+                    //         .stdout(Stdio::piped())
+                    //         .spawn()
+                    //         .expect("Failed to start process");
+
+                    //     let output = child.stdout.take().expect("Failed to open stdout");
+                    //     let mut output_str = String::new();
+                    //     let mut reader = BufReader::new(output);
+                    //     reader.read_to_string(&mut output_str).expect("Failed to read stdout");
+
+                    //     // 将子进程的输出发送到主线程
+                    //     tx.send(output_str).expect("Failed to send output");
+                    // });
+                    // let start_time = Instant::now();
+                    // // 主线程等待 5分钟或子进程输出
+                    // let result = loop {
+                    //     // 检查是否超时
+                    //     if start_time.elapsed() >= timeout {
+                    //         println!("Timeout reached, returning unsat.");
+                    //         return Err(Error::Timeout);
+                    //         // 如果超时，发送 unsat 并退出
+                    //         break "unsat".to_string();
+                    //     }
+
+                    //     // 检查子进程是否已经返回结果
+                    //     match rx.try_recv() {
+                    //         Ok(output_str) => {
+                    //             println!("Process output: {}", output_str);
+                    //             break output_str; // 返回子进程的输出
+                    //         }
+                    //         Err(_) => {
+                    //             // 如果没有收到消息，继续循环，等待超时或子进程结果
+                    //             thread::sleep(Duration::from_millis(100)); // 避免 CPU 占用过高
+                    //         }
+                    //     }
+                    // };
 
                     // let mut child = Command::new(
                     //     "/public/home/jwli/workSpace/xjs/sigcomm_exp_24/aaltaf/aaltaf",
@@ -644,50 +854,50 @@ impl Strategy for StrategyTRTA {
                     // println!("Output: {}", output_str);
 
                     // 对aalta的输出进行解析
-                    let lines: Vec<&str> = result.lines().collect();
+                    // let lines: Vec<&str> = result.lines().collect();
                     // let mut indices = Vec::new();
                     // 检查结果是否为sat
                     // if lines.len() > 1 && lines[0].trim() == "sat" {
-                    if lines[0].trim() == "sat" {
-                        // 对从第三行之后的结果进行处理
-                        let aalta_output_path =
-                            "/home/xu/Documents/snowcap-CDCL/target/debug/output_to_file.txt";
-                        let content =
-                            fs::read_to_string(aalta_output_path).expect("Failed to read file");
-                        let aalta_output: Vec<&str> = content.lines().collect();
-                        for line in aalta_output.iter() {
-                            // skip first two lines (header and "sat")
-                            // 按，分片
-                            for part in line.split(",") {
-                                let trimmed = part.trim();
+                    // if lines[0].trim() == "sat" {
+                    //     // 对从第三行之后的结果进行处理
+                    //     let aalta_output_path =
+                    //         "/home/xu/Documents/snowcap-CDCL/target/debug/output_to_file.txt";
+                    //     let content =
+                    //         fs::read_to_string(aalta_output_path).expect("Failed to read file");
+                    //     let aalta_output: Vec<&str> = content.lines().collect();
+                    //     for line in aalta_output.iter() {
+                    //         // skip first two lines (header and "sat")
+                    //         // 按，分片
+                    //         for part in line.split(",") {
+                    //             let trimmed = part.trim();
 
-                                // 检索所有以x开始的变量
-                                if trimmed.starts_with("x") {
-                                    // Extract the number after "x", whether or not it is preceded by "!"
-                                    if let Some(index_str) = trimmed.strip_prefix("x") {
-                                        if let Ok(index) = index_str.trim().parse::<usize>() {
-                                            // Push the extracted index to the indices vector
-                                            indices.push(index);
-                                        }
-                                    }
-                                    //检索在开头但是以（x开始的变量
-                                } else if trimmed.starts_with("(x") {
-                                    // Handle the case for "(xN" where N is the index we want
-                                    if let Some(index_str) = trimmed.strip_prefix("(x") {
-                                        if let Ok(index) = index_str.trim().parse::<usize>() {
-                                            indices.push(index);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    //             // 检索所有以x开始的变量
+                    //             if trimmed.starts_with("x") {
+                    //                 // Extract the number after "x", whether or not it is preceded by "!"
+                    //                 if let Some(index_str) = trimmed.strip_prefix("x") {
+                    //                     if let Ok(index) = index_str.trim().parse::<usize>() {
+                    //                         // Push the extracted index to the indices vector
+                    //                         indices.push(index);
+                    //                     }
+                    //                 }
+                    //                 //检索在开头但是以（x开始的变量
+                    //             } else if trimmed.starts_with("(x") {
+                    //                 // Handle the case for "(xN" where N is the index we want
+                    //                 if let Some(index_str) = trimmed.strip_prefix("(x") {
+                    //                     if let Ok(index) = index_str.trim().parse::<usize>() {
+                    //                         indices.push(index);
+                    //                     }
+                    //                 }
+                    //             }
+                    //         }
+                    //     }
 
-                        // 输出解析出来的更新序列
-                        println!("Extracted indices: {:?}", indices);
-                    } else {
-                        println!("Second line is not 'sat', skipping extraction.");
-                        return Err(Error::ProbablyNoSafeOrdering);
-                    }
+                    //     // 输出解析出来的更新序列
+                    //     println!("Extracted indices: {:?}", indices);
+                    // } else {
+                    //     println!("Second line is not 'sat', skipping extraction.");
+                    //     return Err(Error::ProbablyNoSafeOrdering);
+                    // }
                     // 等待子进程完成
                     // let exit_status = child.wait().expect("Child process wasn't running");
 
@@ -848,7 +1058,7 @@ impl Strategy for StrategyTRTA {
                     //(prefix -> (combined_formula_form_loops)) & ltl_string & always_formula_parts & F x0 & F x1 & F x2 & F x3 & F x4 & F x5
                     ltl_string = format!("({}) & {}", combined_formula_form_loops, ltl_string);
                     let aalta_input = format!("({}) & {}", ltl_string, always_formula_parts);
-                    println!("aalta_input: {}", aalta_input);
+                    // println!("aalta_input: {}", aalta_input);
                     let mut file = File::create(
                         "/home/xu/Documents/snowcap-CDCL/target/debug/aalta_input.txt",
                     )
@@ -860,7 +1070,7 @@ impl Strategy for StrategyTRTA {
                     let start_time = Instant::now();
 
                     //新建子线程
-                    let timeout = Duration::new(120, 0);
+                    let timeout = Duration::new(5, 0);
                     let (tx, rx) = mpsc::channel();
 
                     let handle = thread::spawn(move || {
