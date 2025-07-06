@@ -350,7 +350,9 @@ impl Strategy for StrategyTRTA {
         // ));
         // println!("formula_parts: {:?}", always_formula_parts);
 
+        let mut counter = 0;
         loop {
+            counter += 1;
             // check for iter overflow检查时间是否已耗尽（即处理时间是否超时）
             if self.stop_time.as_ref().map(|time| time.elapsed().is_ok()).unwrap_or(false) {
                 // time budget is used up!
@@ -1184,27 +1186,27 @@ impl Strategy for StrategyTRTA {
                     // 模块头
                     verilog.push_str(&format!(
                         "module OneHotLatch #(\n\
-) (\n\
-    input wire clk,\n\
-    input wire [{}:0] x,\n\
-    output wire prop\n\
-);\n\n",
+                        ) (\n\
+                            input wire clk,\n\
+                            input wire [{}:0] x,\n\
+                            output wire prop\n\
+                        );\n\n",
                         width - 1
                     ));
 
                     // 信号定义
                     verilog.push_str(&format!(
                         "    wire valid_input;\n\
-    wire done;\n\
-    reg [{}:0] l;\n\n",
+                        wire done;\n\
+                        reg [{}:0] l;\n\n",
                         width - 1
                     ));
 
                     // 校验逻辑
                     verilog.push_str(&format!(
                         "    assign valid_input = (x != 0) && ((x & (x - 1)) == 0);\n\
-    assign done = (l == {}'b{});\n\
-    assign prop = done;\n\n",
+                        assign done = (l == {}'b{});\n\
+                        assign prop = done;\n\n",
                         width,
                         "1".repeat(width)
                     ));
@@ -1212,15 +1214,15 @@ impl Strategy for StrategyTRTA {
                     // assume 输入合法
                     verilog.push_str(
                         "    always @(*) begin\n\
-        assume(valid_input);\n\
-    end\n\n",
+                        assume(valid_input);\n\
+                    end\n\n",
                     );
 
                     // latch 状态更新逻辑
                     verilog.push_str(
                         "    always @(posedge clk) begin\n\
-        l <= l | x;\n\
-    end\n\n",
+                        l <= l | x;\n\
+                    end\n\n",
                     );
 
                     // 生成顺序约束逻辑
@@ -1229,8 +1231,8 @@ impl Strategy for StrategyTRTA {
                             // 无前置：after 永远不应被激活
                             verilog.push_str(&format!(
                                 "    always @(*) begin\n\
-                assume(!x[{}]);\n\
-            end\n\n",
+                                assume(!x[{}]);\n\
+                            end\n\n",
                                 after
                             ));
                         } else {
@@ -1239,8 +1241,8 @@ impl Strategy for StrategyTRTA {
                             let or_cond = conds.join(" || ");
                             verilog.push_str(&format!(
                                 "    always @(*) begin\n\
-                assume(!(x[{}] && !({})));\n\
-            end\n\n",
+                                assume(!(x[{}] && !({})));\n\
+                            end\n\n",
                                 after, or_cond
                             ));
                         }

@@ -6,11 +6,11 @@ import sys
 import select
 
 directory = './eval_sigcomm2021/topology_zoo/'
-output_file = 'experiment_results_cdcl.txt'
+output_file = 'experiment_results_cdcl_2.txt'
 
 # 确保输出文件是空的，或者创建新的
 with open(output_file, 'w') as f:
-    f.write('Filename\tRuntime\n')
+    f.write('Filename\tLength\tType\tRuntime\n')
 
 # 遍历目录中的所有 .gml 文件
 for filename in os.listdir(directory):
@@ -76,11 +76,29 @@ for filename in os.listdir(directory):
         # 检查是否包含 'timeout' 字样
         if 'timeout' in stdout.lower() or 'timeout' in stderr.lower():
             runtime = '-1'  # 如果出现 timeout，超时，记录 -1
-        elif 'skipping extraction' in stdout.lower():
-            runtime = '-2'  # 如果出现 skipping extraction，无解，记录 -2
+        # elif 'skipping extraction' in stdout.lower():
+        #     runtime = '-2'  # 如果出现 skipping extraction，无解，记录 -2
         else:
             # 查找包含 '代码运行时间:' 的行，并提取后面的数字
             match = re.search(r'代码运行时间:\s*(.*)', stdout)
+            length = re.search(r'self\.groups\.len\(\):\s*(\d+)', stdout)
+            error_match = re.search(r'Error checking policies:\s*(\w+)', stdout)
+
+            if error_match:
+                error_type_str = error_match.group(1)
+                if error_type_str == 'ForwardingLoops':
+                    error_type = "2"
+                elif error_type_str == 'ForwardingBlackHole':
+                    error_type = "1"
+                else:
+                    error_type = "0"  # 其他未知错误
+            else:
+                error_type = "0"  # 没有错误
+
+            if length:
+                l = length.group(1)
+            else:
+                l = '0'
 
             if match:
                 runtime = match.group(1)  # 获取运行时间数字
@@ -89,8 +107,8 @@ for filename in os.listdir(directory):
 
         # 将结果写入输出文件
         with open(output_file, 'a') as f:
-            f.write('{}\t{}\n'.format(filename, runtime))
+            f.write('{}\t{}\t{}\t{}\n'.format(filename, l, error_type, runtime))
 
-        print(f'Executed {filename} successfully. Runtime: {runtime}')
+        print(f'Executed {filename} successfully. Length:{l} and Runtime: {runtime}')
 
 print("Experiment finished. Results saved to:", output_file)
