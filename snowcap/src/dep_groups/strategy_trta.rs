@@ -248,7 +248,155 @@ impl Strategy for StrategyTRTA {
 
     fn work(&mut self, mut abort: Stopper) -> Result<Vec<ConfigModifier>, Error> {
         // setup the stack with a randomized frame
-        let mut stack = vec![StackFrame::new(0..self.groups.len(), 0, &mut self.rng)];
+        // let mut stack = vec![StackFrame::new(0..self.groups.len(), 0, &mut self.rng)];
+        let mut width = self.groups.len();
+        let mut verilog = String::new();
+
+        // 构造 Verilog 代码
+        verilog.push_str(&format!(
+            "module OneHotLatch #(\n\
+            )\n(\n\
+                input wire clk,\n\
+                input wire [{width_minus1}:0] x,\n\
+                output wire prop\n\
+            );\n\n",
+            width_minus1 = width - 1
+        ));
+        verilog.push_str(&format!(
+            "    wire valid_input;\n\
+                wire done;\n\
+                reg [{width_minus1}:0] l;\n\n",
+            width_minus1 = width - 1
+        ));
+        verilog.push_str(&format!(
+            "    assign valid_input = (x != 0) && ((x & (x - 1)) == 0);\n\
+                    assign done = (l == {width}'b{all_ones});\n\
+                    assign prop = done;\n\n",
+            width = width,
+            all_ones = "1".repeat(width)
+        ));
+        verilog.push_str(
+            "    always @(*) begin\n\
+                assume(valid_input);\n\
+            end\n\n",
+        );
+        verilog.push_str(
+            "    always @(posedge clk) begin\n\
+                l <= l | x;\n\
+            end\n\n",
+        );
+        verilog.push_str("endmodule\n");
+
+        // 写入 Verilog 文件
+        let path = Path::new("/home/xu/Documents/ver/snowcap-CDCL/HDL.sv");
+        let mut file = File::create(path).expect("无法创建文件");
+        file.write_all(verilog.as_bytes()).expect("无法写入 Verilog 内容");
+
+        // 调用 yosys
+        let yosys_status = Command::new("yosys")
+            .arg("generate_aiger.ys")
+            .current_dir("/home/xu/Documents/ver/snowcap-CDCL")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("Failed to execute yosys");
+
+        if !yosys_status.success() {
+            eprintln!("❌ Yosys 执行失败！");
+            std::process::exit(1);
+        }
+
+        // 调用 rIC3
+        let ric3_output = Command::new("../rIC3/target/release/rIC3")
+            .arg("--witness")
+            .arg("design_aiger.aag")
+            .current_dir("/home/xu/Documents/ver/snowcap-CDCL")
+            .output()
+            .expect("❌ Failed to execute rIC3");
+
+        let stdout_str = String::from_utf8_lossy(&ric3_output.stdout);
+        let stderr_str = String::from_utf8_lossy(&ric3_output.stderr);
+
+        // 写入日志文件
+        let log_path = Path::new("/home/xu/Documents/ver/snowcap-CDCL/output_to_file.txt");
+        let mut log_file = File::create(log_path).expect("❌ 无法创建日志文件");
+
+        writeln!(log_file, "=== STDOUT ===\n{}", stdout_str).expect("❌ 写入 stdout 失败");
+        writeln!(log_file, "\n=== STDERR ===\n{}", stderr_str).expect("❌ 写入 stderr 失败");
+
+        // 解析 witness
+        let output_content = fs::read_to_string(log_path).expect("❌ 无法读取日志文件");
+
+        let stdout_marker = "=== STDOUT ===";
+        let stdout_start = output_content
+            .find(stdout_marker)
+            .map(|idx| idx + stdout_marker.len())
+            .expect("❌ 未找到 STDOUT 区域");
+
+        let stdout_end = output_content.find("=== STDERR ===").unwrap_or(output_content.len());
+        let stdout_section = &output_content[stdout_start..stdout_end];
+
+        let result_line = stdout_section
+            .lines()
+            .find(|line| line.trim_start().starts_with("result:"))
+            .unwrap_or("");
+
+        let mut indices = Vec::new();
+
+        if result_line.contains("safe") || result_line.contains("unsafe") {
+            let lines: Vec<&str> = stdout_section.lines().collect();
+
+            let mut start_index = None;
+            let mut dot_index = None;
+
+            for (i, line) in lines.iter().enumerate() {
+                let trimmed = line.trim();
+                if start_index.is_none() && !trimmed.is_empty() && trimmed.chars().all(|c| c == '0')
+                {
+                    start_index = Some(i + 1);
+                }
+                if trimmed == "." {
+                    dot_index = Some(i);
+                    break;
+                }
+            }
+
+            let mut extracted_lines = Vec::new();
+            if let (Some(start), Some(dot)) = (start_index, dot_index) {
+                let end = dot.saturating_sub(2);
+                for i in start..=end {
+                    let line = lines[i].trim();
+                    if line.starts_with('1')
+                        && line.chars().all(|c| c == '0' || c == '1')
+                        && line[1..].contains('1')
+                    {
+                        extracted_lines.push(line);
+                    }
+                }
+            }
+
+            for line in &extracted_lines {
+                let bits = line.trim();
+                if bits.len() < 2 {
+                    continue;
+                }
+                let tail_bits = &bits[1..];
+                if let Some(pos) = tail_bits.chars().position(|c| c == '1') {
+                    indices.push(pos);
+                }
+            }
+        } else {
+            println!("⚠️ 未检测到 safe 或 unsafe 结果。");
+        }
+
+        // ✅ 用 rIC3 提取到的 indices 初始化 StackFrame
+        let mut stack = {
+            let rem_groups = indices.clone();
+            let num_undo = 0;
+            let idx = 0;
+            vec![StackFrame { num_undo, rem_groups, idx }]
+        };
+
         let mut current_sequence: Vec<usize> = vec![];
 
         // clone the network and the hard policies to work with them for the tree exploration
