@@ -6,7 +6,7 @@ import sys
 import select
 
 directory = './eval_sigcomm2021/topology_zoo/'
-output_file = 'experiment_results_cdcl_3.txt'
+output_file = 'experiment_results_cdcl_6.txt'
 
 # 确保输出文件是空的，或者创建新的
 with open(output_file, 'w') as f:

@@ -1,0 +1,41 @@
+=== STDOUT ===
+abc preprocess timeout
+abc preprocess timeout
+abc preprocess timeout
+abc preprocess timeout
+abc preprocess timeout
+result: unsafe
+1
+b0
+000000
+1000010
+1000001
+1000100
+1001000
+1100000
+1010000
+1000001
+.
+
+
+
+=== STDERR ===
+[INFO  rIC3] the model to be checked: /home/xu/Documents/ver/snowcap-CDCL/design_aiger.aag
+[INFO  rIC3::portfolio] start engine: 
+[INFO  rIC3::portfolio] start engine: --rseed 5555
+[INFO  rIC3::portfolio] start engine: --rseed 55
+[INFO  rIC3::portfolio] start engine: 
+[INFO  rIC3::portfolio] start engine: --ic3-ctg-limit 5
+[INFO  rIC3::portfolio] start engine: --ic3-ctg-max 5 --ic3-ctg-limit 15
+[INFO  rIC3::portfolio] start engine: --ic3-abs-cst --rseed 55
+[INFO  rIC3::portfolio] start engine: --ic3-ctp
+[INFO  rIC3::portfolio] start engine: 
+[INFO  rIC3::portfolio] start engine: --ic3-inn
+[INFO  rIC3::portfolio] start engine: --ic3-ctg-limit 5 --ic3-inn
+[INFO  rIC3::portfolio] start engine: 1
+[INFO  rIC3::portfolio] start engine: 10
+[INFO  rIC3::portfolio] start engine: --step 70
+[INFO  rIC3::portfolio] start engine: --step 135
+[INFO  rIC3::portfolio] best configuration: 
+[INFO  rIC3::portfolio] start engine: 1 --kind-simple-path
+
